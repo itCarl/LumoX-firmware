@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumox · Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#1a1a1a;color:#d8d8d8;font:13px/1.4 'Segoe UI',system-ui,sans-serif;min-height:100vh}
+header{background:#242424;border-bottom:1px solid #3a3a3a;padding:10px 18px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;letter-spacing:3px;color:#4a9eff;font-size:16px}
+nav a{color:#888;text-decoration:none;padding:6px 10px;border-radius:4px;transition:.15s}
+nav a:hover{color:#d8d8d8;background:#2e2e2e}
+nav a.active{color:#4a9eff;background:#2e2e2e}
+#dot{width:10px;height:10px;border-radius:50%;margin-left:auto;background:#e03030;transition:.2s;box-shadow:0 0 6px rgba(224,48,48,.5)}
+#dot.on{background:#30c060;box-shadow:0 0 6px rgba(48,192,96,.6)}
+main{max-width:1400px;margin:0 auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.card{background:#242424;border:1px solid #3a3a3a;border-radius:6px;overflow:hidden}
+.card h3{background:#2e2e2e;padding:8px 12px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#888;border-bottom:1px solid #3a3a3a}
+.card-body{padding:10px 12px}
+.kv{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #2e2e2e;font-size:12px}
+.kv:last-child{border-bottom:0}
+.kv>span:first-child{color:#888}
+.kv>span:last-child{font-family:monospace;color:#d8d8d8}
+.badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.badge.ap{background:#2a5a8a;color:#bfd8f0}
+.badge.sta{background:#1a4020;color:#8fd8a0}
+.badge.fb{background:#5a3a00;color:#ffbf60}
+.badge.eth{background:#1a3a5a;color:#8fbfe0}
+.badge.down{background:#3a2020;color:#ff9090}
+.card.full{grid-column:1/-1}
+#dmx-grid{display:grid;grid-template-columns:repeat(32,1fr);gap:2px;padding:10px}
+.cl{background:#2e2e2e;color:#666;font:10px/1 monospace;text-align:center;padding:5px 2px;border-radius:2px}
+.cl.on{color:#111;font-weight:700}
+.ver{position:fixed;bottom:6px;left:8px;color:#555;font:10px/1 'Consolas',monospace;letter-spacing:.5px;pointer-events:none;z-index:5}
+</style></head><body>
+<header>
+  <div class="brand">LUMOX</div>
+  <nav>
+    <a href="/" class="active">Dashboard</a>
+    <a href="/health">Health</a>
+    <a href="/control">Control</a>
+    <a href="/config">Config</a>
+    <a href="/update">OTA Update</a>
+  </nav>
+  <div id="dot" title="WebSocket"></div>
+</header>
+<main>
+  <div class="card">
+    <h3>Network</h3>
+    <div class="card-body">
+      <div class="kv"><span>Active</span><span id="n-mode">—</span></div>
+      <div class="kv"><span>SSID</span><span id="n-ssid">—</span></div>
+      <div class="kv"><span>IP</span><span id="n-ip">—</span></div>
+      <div class="kv"><span>RSSI</span><span id="n-rssi">—</span></div>
+      <div class="kv"><span>Clients</span><span id="n-cli">—</span></div>
+      <div class="kv"><span>Hostname</span><span>lumox.local</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Interfaces</h3>
+    <div class="card-body">
+      <div class="kv"><span>WiFi (STA)</span><span id="i-sta">—</span></div>
+      <div class="kv"><span>STA IP</span><span id="i-sta-ip">—</span></div>
+      <div class="kv"><span>Ethernet</span><span id="i-eth">—</span></div>
+      <div class="kv"><span>ETH IP</span><span id="i-eth-ip">—</span></div>
+      <div class="kv"><span>ETH Link</span><span id="i-eth-link">—</span></div>
+      <div class="kv"><span>ETH MAC</span><span id="i-eth-mac">—</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Art-Net</h3>
+    <div class="card-body">
+      <div class="kv"><span>UDP Port</span><span>6454</span></div>
+      <div class="kv"><span>Universe</span><span id="a-uni">—</span></div>
+      <div class="kv"><span>Packets</span><span id="a-pkts">—</span></div>
+      <div class="kv"><span>Last Packet</span><span id="a-last">—</span></div>
+      <div class="kv"><span>Sender</span><span id="a-from">—</span></div>
+      <div class="kv"><span>Last Uni Seen</span><span id="a-luni">—</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>DMX Output</h3>
+    <div class="card-body">
+      <div class="kv"><span>Active channels</span><span id="d-act">—</span></div>
+      <div class="kv"><span>Max value</span><span id="d-max">—</span></div>
+      <div class="kv"><span>Rate</span><span id="d-rate">—</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>System</h3>
+    <div class="card-body">
+      <div class="kv"><span>Uptime</span><span id="s-up">—</span></div>
+      <div class="kv"><span>Free Heap</span><span id="s-heap">—</span></div>
+      <div class="kv"><span>CPU</span><span id="s-cpu">—</span></div>
+      <div class="kv"><span>Chip</span><span id="s-chip">—</span></div>
+      <div class="kv"><span>Flash</span><span id="s-flash">—</span></div>
+    </div>
+  </div>
+  <div class="card full">
+    <h3>DMX Live State — <span id="d-sum">0 active</span></h3>
+    <div id="dmx-grid"></div>
+  </div>
+</main>
+<script>
+var g=document.getElementById('dmx-grid'),C=[],D={};
+for(var i=0;i<512;i++){var c=document.createElement('div');c.className='cl';c.textContent=i+1;g.appendChild(c);C.push(c)}
+function fU(s){var d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0,sec=s%60;if(d)return d+'d '+h+'h';if(h)return h+'h '+m+'m';if(m)return m+'m '+sec+'s';return sec+'s'}
+function fB(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return n+' B'}
+function fA(ms){if(!ms)return'never';if(ms>=60000)return(ms/60000|0)+'m ago';if(ms>=1000)return(ms/1000).toFixed(1)+'s ago';return ms+' ms ago'}
+function doS(d){
+  var n=d.net,a=d.artnet,s=d.sys,h=d.dmx||{};  // h used only for live rate
+  var mh;
+  if(n.mode=='AP')       mh='<span class="badge ap">AP</span>';
+  else if(n.mode=='ETH') mh='<span class="badge eth">ETH</span>';
+  else                   mh='<span class="badge sta">STA</span>';
+  if(n.fb)mh+=' <span class="badge fb">fallback</span>';
+  document.getElementById('n-mode').innerHTML=mh;
+  document.getElementById('n-ssid').textContent=n.ssid;
+  document.getElementById('n-ip').textContent=n.ip;
+  document.getElementById('n-rssi').textContent=(n.mode=='STA')?(n.rssi+' dBm'):'—';
+  document.getElementById('n-cli').textContent=n.mode=='AP'?n.clients:'—';
+  // Interfaces card
+  var sta=n.sta||{up:false},eth=n.eth||{up:false};
+  document.getElementById('i-sta').innerHTML     = sta.up?'<span class="badge sta">UP</span> '+sta.rssi+' dBm':'<span class="badge down">DOWN</span>';
+  document.getElementById('i-sta-ip').textContent= sta.up?sta.ip:'—';
+  document.getElementById('i-eth').innerHTML     = eth.up?'<span class="badge eth">UP</span>':'<span class="badge down">DOWN</span>';
+  document.getElementById('i-eth-ip').textContent= eth.up?eth.ip:'—';
+  document.getElementById('i-eth-link').textContent= eth.up?(eth.speed+' Mbps '+(eth.fdx?'FDX':'HDX')):'—';
+  document.getElementById('i-eth-mac').textContent = eth.up?eth.mac:'—';
+  document.getElementById('a-uni').textContent=a.uni;
+  document.getElementById('a-pkts').textContent=a.pkts.toLocaleString();
+  document.getElementById('a-last').textContent=fA(a.age);
+  document.getElementById('a-from').textContent=a.sender||'—';
+  document.getElementById('a-luni').textContent=a.luni;
+  document.getElementById('s-up').textContent=fU(s.up);
+  document.getElementById('s-heap').textContent=fB(s.heap)+' / '+fB(s.heapTotal);
+  document.getElementById('s-cpu').textContent=s.mhz+' MHz';
+  document.getElementById('s-chip').textContent=s.chip+' rev '+s.rev+' · '+s.cores+' cores';
+  document.getElementById('s-flash').textContent=fB(s.flash);
+  // DMX rate from health stats — falls back to nominal if unmeasured.
+  document.getElementById('d-rate').textContent=h.rateHz?h.rateHz+' Hz':'~44 Hz';
+}
+function doD(buf){
+  var act=0,mx=0;
+  for(var i=0;i<512;i++){
+    var v=buf[i],c=C[i];
+    if(v>0)act++;
+    if(v>mx)mx=v;
+    if(v>0){c.textContent=v;c.className='cl on';c.style.background='rgba(74,158,255,'+(0.3+0.7*v/255)+')';}
+    else{c.textContent=i+1;c.className='cl';c.style.background='';}
+  }
+  document.getElementById('d-act').textContent=act+' / 512';
+  document.getElementById('d-max').textContent=mx;
+  document.getElementById('d-sum').textContent=act+' active';
+}
+var ws;
+function connect(){
+  ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws.binaryType='arraybuffer';
+  ws.onopen=function(){document.getElementById('dot').classList.add('on')};
+  ws.onclose=function(){document.getElementById('dot').classList.remove('on');setTimeout(connect,2000)};
+  ws.onmessage=function(e){
+    if(typeof e.data==='string'){try{doS(JSON.parse(e.data))}catch(x){}}
+    else{doD(new Uint8Array(e.data))}
+  };
+}
+connect();
+</script>
+<div class="ver">v{{VERSION}} · {{BUILD_DATE}}</div>
+</body></html>

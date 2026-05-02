@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumox · Health</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#1a1a1a;color:#d8d8d8;font:13px/1.4 'Segoe UI',system-ui,sans-serif;min-height:100vh}
+header{background:#242424;border-bottom:1px solid #3a3a3a;padding:10px 18px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;letter-spacing:3px;color:#4a9eff;font-size:16px}
+nav a{color:#888;text-decoration:none;padding:6px 10px;border-radius:4px;transition:.15s}
+nav a:hover{color:#d8d8d8;background:#2e2e2e}
+nav a.active{color:#4a9eff;background:#2e2e2e}
+#dot{width:10px;height:10px;border-radius:50%;margin-left:auto;background:#e03030;transition:.2s;box-shadow:0 0 6px rgba(224,48,48,.5)}
+#dot.on{background:#30c060;box-shadow:0 0 6px rgba(48,192,96,.6)}
+main{max-width:1100px;margin:0 auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.card{background:#242424;border:1px solid #3a3a3a;border-radius:6px;overflow:hidden}
+.card h3{background:#2e2e2e;padding:8px 12px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#888;border-bottom:1px solid #3a3a3a;display:flex;justify-content:space-between;align-items:center}
+.card-body{padding:10px 12px}
+.kv{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #2e2e2e;font-size:12px}
+.kv:last-child{border-bottom:0}
+.kv>span:first-child{color:#888}
+.kv>span:last-child{font-family:monospace;color:#d8d8d8}
+.badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:600}
+.badge.ok{background:#1a4020;color:#8fd8a0}
+.badge.fail{background:#3a2020;color:#ff9090}
+.badge.warn{background:#3a3010;color:#e0c060}
+.banner{padding:14px 16px;border-radius:6px;margin-bottom:12px;font-size:14px;font-weight:600;grid-column:1/-1}
+.banner.ok{background:#1a4020;color:#8fd8a0;border:1px solid #2a5030}
+.banner.fail{background:#3a1010;color:#ff8060;border:1px solid #5a2020}
+.bigval{font-family:monospace;font-size:18px;color:#d8d8d8}
+.muted{color:#666;font-size:11px}
+.ver{position:fixed;bottom:6px;left:8px;color:#555;font:10px/1 'Consolas',monospace;letter-spacing:.5px;pointer-events:none;z-index:5}
+</style></head><body>
+<header>
+  <div class="brand">LUMOX</div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/health" class="active">Health</a>
+    <a href="/control">Control</a>
+    <a href="/config">Config</a>
+    <a href="/update">OTA Update</a>
+  </nav>
+  <div id="dot" title="WebSocket"></div>
+</header>
+<main>
+  <div id="banner" class="banner ok">Waiting for data...</div>
+
+  <div class="card">
+    <h3>DMX Output <span id="b-dmx" class="badge ok">—</span></h3>
+    <div class="card-body">
+      <div class="kv"><span>Frame rate</span><span id="d-rate" class="bigval">—</span></div>
+      <div class="kv"><span>Frames sent</span><span id="d-fr">—</span></div>
+      <div class="kv"><span>Send errors</span><span id="d-se">—</span></div>
+      <div class="kv"><span>Wait timeouts</span><span id="d-wt">—</span></div>
+      <div class="kv"><span>Error streak (now / max)</span><span id="d-ce">—</span></div>
+      <div class="kv"><span>Mutex peak</span><span id="d-mu">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Art-Net Link <span id="b-an" class="badge ok">—</span></h3>
+    <div class="card-body">
+      <div class="kv"><span>Packets received</span><span id="a-pkts">—</span></div>
+      <div class="kv"><span>Last packet</span><span id="a-age">—</span></div>
+      <div class="kv"><span>Sender</span><span id="a-from">—</span></div>
+      <div class="kv"><span>Stale (out-of-order)</span><span id="a-stale">—</span></div>
+      <div class="kv"><span>Locked (other sender)</span><span id="a-lock">—</span></div>
+      <div class="kv"><span>Sender swaps</span><span id="a-sw">—</span></div>
+      <div class="kv"><span>ProtVer rejects</span><span id="a-bp">—</span></div>
+      <div class="kv"><span>ArtSync</span><span id="a-sy">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Network</h3>
+    <div class="card-body">
+      <div class="kv"><span>Active interface</span><span id="n-mode">—</span></div>
+      <div class="kv"><span>IP</span><span id="n-ip">—</span></div>
+      <div class="kv"><span>STA RSSI</span><span id="n-rssi">—</span></div>
+      <div class="kv"><span>ETH link</span><span id="n-eth">—</span></div>
+      <div class="kv"><span>ETH speed</span><span id="n-spd">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>System</h3>
+    <div class="card-body">
+      <div class="kv"><span>Uptime</span><span id="s-up">—</span></div>
+      <div class="kv"><span>Free heap</span><span id="s-heap">—</span></div>
+      <div class="kv"><span>CPU</span><span id="s-cpu">—</span></div>
+    </div>
+  </div>
+</main>
+<script>
+function fU(s){var d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0,sec=s%60;if(d)return d+'d '+h+'h';if(h)return h+'h '+m+'m';if(m)return m+'m '+sec+'s';return sec+'s'}
+function fB(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return n+' B'}
+function fA(ms){if(!ms)return'never';if(ms>=60000)return(ms/60000|0)+'m ago';if(ms>=1000)return(ms/1000).toFixed(1)+'s ago';return ms+' ms ago'}
+function id(x){return document.getElementById(x)}
+function paint(d){
+  var n=d.net||{},a=d.artnet||{},s=d.sys||{},h=d.dmx||{};
+  // Banner
+  var b=id('banner');
+  if(h.ok){b.className='banner ok';b.textContent='Signal clean — '+(h.rateHz||0)+' Hz, '+(h.frames||0).toLocaleString()+' frames sent'}
+  else    {b.className='banner fail';b.textContent='UNCLEAN: '+(h.reason||'unknown')}
+  // DMX card
+  id('b-dmx').textContent = h.ok?'OK':'FAIL';
+  id('b-dmx').className   = 'badge '+(h.ok?'ok':'fail');
+  id('d-rate').textContent= (h.rateHz||0)+' Hz';
+  id('d-fr').textContent  = (h.frames||0).toLocaleString();
+  id('d-se').textContent  = h.sendErr||0;
+  id('d-wt').textContent  = h.waitTO||0;
+  id('d-ce').textContent  = (h.consecErr||0)+' / '+(h.maxConsec||0);
+  id('d-mu').textContent  = (h.maxMutexUs||0)+' µs';
+  // Art-Net card — green if recent traffic, warn if stale
+  var rxOk = a.pkts>0 && a.age<2000;
+  id('b-an').textContent = rxOk?'RX':'IDLE';
+  id('b-an').className   = 'badge '+(rxOk?'ok':'warn');
+  id('a-pkts').textContent = (a.pkts||0).toLocaleString();
+  id('a-age').textContent  = fA(a.age||0);
+  id('a-from').textContent = a.sender||'—';
+  id('a-stale').textContent= a.stale||0;
+  id('a-lock').textContent = a.locked||0;
+  id('a-sw').textContent   = a.swaps||0;
+  id('a-bp').textContent   = a.badProto||0;
+  id('a-sy').textContent   = (a.syncs||0)+(a.inSync?' (active)':'');
+  // Network
+  id('n-mode').textContent = n.mode||'—';
+  id('n-ip').textContent   = n.ip||'—';
+  id('n-rssi').textContent = (n.mode=='STA')?(n.rssi+' dBm'):'—';
+  var eth=n.eth||{};
+  id('n-eth').textContent  = eth.up?'UP':(eth.link?'LINK / NO DHCP':'DOWN');
+  id('n-spd').textContent  = eth.up?(eth.speed+' Mbps '+(eth.fdx?'FDX':'HDX')):'—';
+  // System
+  id('s-up').textContent   = fU(s.up||0);
+  id('s-heap').textContent = fB(s.heap||0)+' / '+fB(s.heapTotal||0);
+  id('s-cpu').textContent  = (s.mhz||0)+' MHz';
+}
+var ws;
+function connect(){
+  ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws.onopen=function(){id('dot').classList.add('on')};
+  ws.onclose=function(){id('dot').classList.remove('on');setTimeout(connect,2000)};
+  ws.onmessage=function(e){
+    if(typeof e.data==='string'){try{paint(JSON.parse(e.data))}catch(x){}}
+    // ignore binary DMX frames here
+  };
+}
+connect();
+</script>
+<div class="ver">v{{VERSION}} · {{BUILD_DATE}}</div>
+</body></html>

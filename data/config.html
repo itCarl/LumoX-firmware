@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumox · Config</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#1a1a1a;color:#d8d8d8;font:13px/1.4 'Segoe UI',system-ui,sans-serif;min-height:100vh}
+header{background:#242424;border-bottom:1px solid #3a3a3a;padding:10px 18px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;letter-spacing:3px;color:#4a9eff;font-size:16px}
+nav a{color:#888;text-decoration:none;padding:6px 10px;border-radius:4px;transition:.15s}
+nav a:hover{color:#d8d8d8;background:#2e2e2e}
+nav a.active{color:#4a9eff;background:#2e2e2e}
+main{max-width:700px;margin:0 auto;padding:16px}
+.card{background:#242424;border:1px solid #3a3a3a;border-radius:6px;overflow:hidden;margin-bottom:12px}
+.card h3{background:#2e2e2e;padding:8px 12px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#888;border-bottom:1px solid #3a3a3a}
+.fr{display:grid;grid-template-columns:140px 1fr;align-items:center;padding:8px 12px;gap:10px;border-bottom:1px solid #2e2e2e}
+.fr:last-child{border-bottom:0}
+.fr label{color:#888;font-size:12px}
+.fr input,.fr select{background:#2e2e2e;border:1px solid #3a3a3a;border-radius:3px;color:#d8d8d8;padding:6px 8px;outline:none;font:inherit;width:100%}
+.fr input:focus,.fr select:focus{border-color:#4a9eff}
+.actions{padding:12px;display:flex;gap:8px;flex-wrap:wrap}
+button{background:#2e2e2e;border:1px solid #3a3a3a;color:#d8d8d8;padding:8px 16px;border-radius:4px;cursor:pointer;font:inherit;transition:.15s}
+button:hover{background:#383838}
+button.primary{background:#4a9eff;border-color:#4a9eff;color:#fff;font-weight:600}
+button.primary:hover{background:#5cacff}
+button.danger{background:#3a1010;border-color:#e03030;color:#e03030}
+button.danger:hover{background:#501515}
+.msg{padding:10px 12px;margin:10px 12px;border-radius:4px;font-size:12px;display:none}
+.msg.ok{background:#1a4020;color:#8fd8a0;display:block}
+.msg.err{background:#3a1010;color:#ff8060;display:block}
+.hint{color:#666;font-size:11px;padding:0 12px 8px;font-style:italic}
+.ver{position:fixed;bottom:6px;left:8px;color:#555;font:10px/1 'Consolas',monospace;letter-spacing:.5px;pointer-events:none;z-index:5}
+</style></head><body>
+<header>
+  <div class="brand">LUMOX</div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/health">Health</a>
+    <a href="/control">Control</a>
+    <a href="/config" class="active">Config</a>
+    <a href="/update">OTA Update</a>
+  </nav>
+</header>
+<main>
+  <div class="card">
+    <h3>WiFi (STA)</h3>
+    <div id="msg" class="msg"></div>
+    <div class="hint">Lumox joins this network. If it can't connect, the access point below starts automatically with a captive portal.</div>
+    <div class="fr"><label>SSID</label><input id="staSsid" type="text" maxlength="32" placeholder="Your WiFi name"></div>
+    <div class="fr"><label>Password</label><input id="staPass" type="password" maxlength="63"></div>
+  </div>
+  <div class="card">
+    <h3>Fallback Access Point</h3>
+    <div class="hint">Only active when STA WiFi is unavailable. Used to (re-)configure the device.</div>
+    <div class="fr"><label>AP SSID</label><input id="apSsid" type="text" maxlength="32" required></div>
+    <div class="fr"><label>AP Password</label><input id="apPass" type="password" maxlength="63" placeholder="min 8 chars, or empty for open"></div>
+  </div>
+  <div class="card">
+    <h3>Ethernet (W5500)</h3>
+    <div class="hint">Wired Art-Net. Preferred over WiFi when plugged in. DHCP = auto-config from router. Static = manual.</div>
+    <div class="fr"><label>Mode</label>
+      <select id="ethDhcp" onchange="ethMode()">
+        <option value="1">DHCP (auto)</option>
+        <option value="0">Static</option>
+      </select>
+    </div>
+    <div class="fr eth-static"><label>IP</label><input id="ethIp"  type="text" placeholder="192.168.1.50"></div>
+    <div class="fr eth-static"><label>Gateway</label><input id="ethGw"  type="text" placeholder="192.168.1.1"></div>
+    <div class="fr eth-static"><label>Subnet</label><input id="ethSub" type="text" placeholder="255.255.255.0"></div>
+    <div class="fr eth-static"><label>DNS</label><input id="ethDns" type="text" placeholder="192.168.1.1"></div>
+    <div class="fr"><label>Disable WiFi</label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input id="wifiOffEth" type="checkbox">
+        <span style="color:#888;font-size:11px">Turn WiFi off while Ethernet is connected (web UI unreachable on WiFi)</span>
+      </label>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Art-Net</h3>
+    <div class="fr"><label>Universe</label><input id="universe" type="number" min="0" max="32767"></div>
+  </div>
+  <div class="card">
+    <div class="actions">
+      <button class="primary" onclick="save()">Save &amp; Reboot</button>
+      <button onclick="reboot()">Reboot</button>
+      <button class="danger" onclick="reset()">Factory Reset</button>
+    </div>
+  </div>
+</main>
+<script>
+function msg(t,ok){var el=document.getElementById('msg');el.className='msg '+(ok?'ok':'err');el.textContent=t}
+function ethMode(){
+  var on=document.getElementById('ethDhcp').value==='0';
+  document.querySelectorAll('.eth-static').forEach(function(e){e.style.display=on?'':'none';});
+}
+function ipOrBlank(s){return (s&&s!=='0.0.0.0')?s:'';}
+async function load(){
+  var r=await fetch('/api/config');var c=await r.json();
+  document.getElementById('apSsid').value=c.apSsid;
+  document.getElementById('apPass').value=c.apPass;
+  document.getElementById('staSsid').value=c.staSsid;
+  document.getElementById('staPass').value=c.staPass;
+  document.getElementById('universe').value=c.universe;
+  document.getElementById('ethDhcp').value=c.ethDhcp?'1':'0';
+  document.getElementById('ethIp').value  = ipOrBlank(c.ethIp);
+  document.getElementById('ethGw').value  = ipOrBlank(c.ethGw);
+  document.getElementById('ethSub').value = ipOrBlank(c.ethSub);
+  document.getElementById('ethDns').value = ipOrBlank(c.ethDns);
+  document.getElementById('wifiOffEth').checked = !!c.wifiOffEth;
+  ethMode();
+}
+async function save(){
+  var dhcp=document.getElementById('ethDhcp').value==='1';
+  var b={
+    apSsid:document.getElementById('apSsid').value,
+    apPass:document.getElementById('apPass').value,
+    staSsid:document.getElementById('staSsid').value,
+    staPass:document.getElementById('staPass').value,
+    universe:+document.getElementById('universe').value,
+    ethDhcp:dhcp,
+    ethIp:document.getElementById('ethIp').value.trim(),
+    ethGw:document.getElementById('ethGw').value.trim(),
+    ethSub:document.getElementById('ethSub').value.trim(),
+    ethDns:document.getElementById('ethDns').value.trim(),
+    wifiOffEth:document.getElementById('wifiOffEth').checked};
+  if(!b.apSsid){msg('AP SSID required.',0);return}
+  if(b.apPass.length>0&&b.apPass.length<8){msg('AP password must be empty or 8+ chars.',0);return}
+  if(!dhcp && !b.ethIp){msg('Static ETH requires an IP.',0);return}
+  var r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
+  if(r.ok){msg('Saved! Rebooting...',1);setTimeout(function(){location.href='/'},4000)}
+  else msg('Error: '+await r.text(),0);
+}
+async function reboot(){
+  if(!confirm('Reboot Lumox?'))return;
+  await fetch('/api/reboot',{method:'POST'});
+  msg('Rebooting...',1);setTimeout(function(){location.href='/'},4000);
+}
+async function reset(){
+  if(!confirm('Erase all settings and reboot to defaults?'))return;
+  await fetch('/api/reset',{method:'POST'});
+  msg('Factory reset. Rebooting...',1);setTimeout(function(){location.href='/'},4000);
+}
+load();
+</script>
+<div class="ver">v{{VERSION}} · {{BUILD_DATE}}</div>
+</body></html>

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumox · Control</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#1a1a1a;color:#d8d8d8;font:13px/1.4 'Segoe UI',system-ui,sans-serif;min-height:100vh;overflow-x:hidden}
+header{background:#242424;border-bottom:1px solid #3a3a3a;padding:10px 18px;display:flex;align-items:center;gap:18px;position:sticky;top:0;z-index:10}
+.brand{font-weight:700;letter-spacing:3px;color:#4a9eff;font-size:16px}
+nav a{color:#888;text-decoration:none;padding:6px 10px;border-radius:4px;transition:.15s}
+nav a:hover{color:#d8d8d8;background:#2e2e2e}
+nav a.active{color:#4a9eff;background:#2e2e2e}
+#dot{width:10px;height:10px;border-radius:50%;margin-left:auto;background:#e03030;transition:.2s;box-shadow:0 0 6px rgba(224,48,48,.5)}
+#dot.on{background:#30c060;box-shadow:0 0 6px rgba(48,192,96,.6)}
+main{max-width:1600px;margin:0 auto;padding:14px}
+
+/* Toolbar */
+.bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:#242424;border:1px solid #3a3a3a;border-radius:6px;padding:10px 14px;margin-bottom:12px}
+.bar h3{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#888;margin-right:4px}
+.tog{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
+.tog input{display:none}
+.tog .sw{width:42px;height:22px;background:#3a2020;border-radius:11px;position:relative;transition:.2s;border:1px solid #4a2828}
+.tog .sw::after{content:'';position:absolute;left:2px;top:2px;width:16px;height:16px;background:#888;border-radius:50%;transition:.2s}
+.tog input:checked+.sw{background:#1a4020;border-color:#2a5030}
+.tog input:checked+.sw::after{left:22px;background:#8fd8a0}
+.tog .lbl{font-weight:600;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#888}
+.tog input:checked~.lbl{color:#8fd8a0}
+.bar select,.bar button{background:#2e2e2e;border:1px solid #3a3a3a;color:#d8d8d8;padding:6px 12px;border-radius:4px;font:inherit;cursor:pointer}
+.bar select:focus{outline:none;border-color:#4a9eff}
+.bar button:hover{background:#383838}
+.bar button.danger{background:#3a1010;border-color:#e03030;color:#e03030}
+.bar button.danger:hover{background:#501515}
+.bar .stat{margin-left:auto;font-size:11px;color:#666;font-family:monospace}
+
+.warn{background:#5a3a00;color:#ffbf60;padding:8px 14px;border-radius:4px;margin-bottom:10px;font-size:12px;display:none}
+.warn.on{display:block}
+
+/* Fader rack — Daslight-style: dense, dark, vertical sliders with LED fill */
+#rack{background:linear-gradient(#1f1f1f,#191919);border:1px solid #3a3a3a;border-radius:6px;padding:10px 8px;display:grid;grid-template-columns:repeat(auto-fill,42px);gap:4px;justify-content:start;overflow-x:auto}
+.f{width:42px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:6px 0 4px;background:#222;border:1px solid #2e2e2e;border-radius:3px;position:relative;transition:border-color .15s,box-shadow .15s}
+.f:hover{border-color:#454545}
+.f.man{border-color:#4a9eff;box-shadow:0 0 0 1px #4a9eff inset,0 0 8px rgba(74,158,255,.25)}
+.f .ch{font:10px/1 monospace;color:#666;letter-spacing:.5px}
+.f.man .ch{color:#4a9eff}
+
+/* Track: recessed slot. Fill: from bottom, gradient. Thumb: horizontal bar. */
+.tr{position:relative;width:14px;height:200px;background:#0d0d0d;border:1px solid #050505;border-radius:2px;box-shadow:inset 0 1px 2px rgba(0,0,0,.7);cursor:ns-resize;touch-action:none}
+.fl{position:absolute;left:0;right:0;bottom:0;background:linear-gradient(to top,#2266aa 0%,#4a9eff 60%,#7fbfff 100%);border-radius:0 0 1px 1px;pointer-events:none;transition:height .03s linear}
+.f.man .fl{background:linear-gradient(to top,#3070cc 0%,#5cacff 60%,#a0d0ff 100%);box-shadow:0 0 6px rgba(74,158,255,.4)}
+.th{position:absolute;left:-4px;right:-4px;height:6px;background:linear-gradient(#d8d8d8,#888);border:1px solid #2a2a2a;border-radius:1px;pointer-events:none;box-shadow:0 1px 2px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.3);transition:top .03s linear}
+.th::before,.th::after{content:'';position:absolute;left:3px;right:3px;height:1px;background:rgba(0,0,0,.5)}
+.th::before{top:1px}
+.th::after{bottom:1px}
+
+/* Value box — small monospaced LCD-ish readout. */
+.v{font:11px/1 'Consolas',monospace;color:#888;background:#0d0d0d;border:1px solid #050505;border-radius:2px;padding:3px 0;width:36px;text-align:center;letter-spacing:.5px;box-shadow:inset 0 1px 2px rgba(0,0,0,.6)}
+.f.man .v{color:#4a9eff;border-color:#1a3a5a}
+
+/* Release X — only visible when channel has manual override. */
+.x{position:absolute;top:1px;right:3px;color:#555;cursor:pointer;font:14px/1 sans-serif;user-select:none;display:none;width:14px;height:14px;text-align:center;line-height:13px;border-radius:50%}
+.x:hover{color:#ff8060;background:rgba(255,128,96,.1)}
+.f.man .x{display:block}
+
+/* Compact for small screens. */
+@media (max-width:640px){
+  #rack{grid-template-columns:repeat(auto-fill,38px)}
+  .f{width:38px}
+  .tr{height:160px}
+  .v{width:32px;font-size:10px}
+}
+.ver{position:fixed;bottom:6px;left:8px;color:#555;font:10px/1 'Consolas',monospace;letter-spacing:.5px;pointer-events:none;z-index:5}
+</style></head><body>
+<header>
+  <div class="brand">LUMOX</div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/health">Health</a>
+    <a href="/control" class="active">Control</a>
+    <a href="/config">Config</a>
+    <a href="/update">OTA Update</a>
+  </nav>
+  <div id="dot" title="WebSocket"></div>
+</header>
+<main>
+  <div class="bar">
+    <h3>Manual</h3>
+    <label class="tog">
+      <input type="checkbox" id="enab">
+      <span class="sw"></span>
+      <span class="lbl" id="enabLbl">OFF</span>
+    </label>
+    <select id="bank"></select>
+    <button id="zero">Zero</button>
+    <button id="full">100%</button>
+    <button id="release" class="danger">Release All</button>
+    <span class="stat"><span id="acnt">0</span> overrides · bank <span id="brange">1–32</span></span>
+  </div>
+  <div class="warn" id="warn">Manual mode is OFF — slider changes are stored but won't drive DMX until you flip the switch.</div>
+  <div id="rack"></div>
+</main>
+<script>
+// Build bank dropdown — 16 banks of 32 channels.
+var bsel=document.getElementById('bank');
+for(var b=0;b<16;b++){
+  var o=document.createElement('option');
+  o.value=b*32;
+  o.textContent=(b*32+1)+'–'+(b*32+32);
+  bsel.appendChild(o);
+}
+
+var rack=document.getElementById('rack'),F=[],live=new Uint8Array(512),overrides={};
+var bank=0,enabled=false;
+
+// Build 32 fader cells.
+for(var i=0;i<32;i++){
+  var d=document.createElement('div');d.className='f';
+  d.innerHTML=
+    '<span class="x" title="Release">&times;</span>'+
+    '<span class="ch">—</span>'+
+    '<div class="tr"><div class="fl"></div><div class="th"></div></div>'+
+    '<span class="v">0</span>';
+  rack.appendChild(d);
+  var f={el:d,ch:d.querySelector('.ch'),v:d.querySelector('.v'),tr:d.querySelector('.tr'),fl:d.querySelector('.fl'),th:d.querySelector('.th'),x:d.querySelector('.x'),idx:i};
+  F.push(f);
+}
+
+function send(body){
+  return fetch('/api/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+}
+
+function setVisual(f,val){
+  // val 0..255 → fill height + thumb position. Track inner usable height
+  // measured live so it works after window resize / responsive media query.
+  var h=f.tr.clientHeight, pct=val/255;
+  var fill=Math.round(pct*h);
+  f.fl.style.height=fill+'px';
+  f.th.style.top=Math.max(0,Math.min(h-6,(h-fill)-3))+'px';
+  f.v.textContent=val;
+}
+
+function paint(){
+  for(var i=0;i<32;i++){
+    var ch=bank+i+1, f=F[i], ov=overrides[ch];
+    f.ch.textContent=ch;
+    if(ov!==undefined){
+      f.el.classList.add('man');
+      setVisual(f,ov);
+    } else {
+      f.el.classList.remove('man');
+      setVisual(f,live[ch-1]||0);
+    }
+  }
+  document.getElementById('acnt').textContent=Object.keys(overrides).length;
+  document.getElementById('brange').textContent=(bank+1)+'–'+(bank+32);
+  document.getElementById('warn').classList.toggle('on', !enabled && Object.keys(overrides).length>0);
+}
+
+// Drag handler — works on a track DIV with pointer events. Computes value
+// from pointer Y relative to track bounds. Also handles single-click set.
+function attach(f){
+  function ptToVal(e){
+    var r=f.tr.getBoundingClientRect(), y=e.clientY-r.top;
+    var pct=1-(y/r.height);
+    pct=Math.max(0,Math.min(1,pct));
+    return Math.round(pct*255);
+  }
+  var dragging=false;
+  function down(e){
+    dragging=true;
+    f.tr.setPointerCapture(e.pointerId);
+    move(e);
+    e.preventDefault();
+  }
+  function move(e){
+    if(!dragging)return;
+    var ch=bank+f.idx+1, val=ptToVal(e);
+    overrides[ch]=val;
+    f.el.classList.add('man');
+    setVisual(f,val);
+    document.getElementById('acnt').textContent=Object.keys(overrides).length;
+    document.getElementById('warn').classList.toggle('on', !enabled && Object.keys(overrides).length>0);
+    send({ch:ch,val:val});
+  }
+  function up(e){
+    if(!dragging)return;
+    dragging=false;
+    try{f.tr.releasePointerCapture(e.pointerId)}catch(_){}
+  }
+  f.tr.addEventListener('pointerdown',down);
+  f.tr.addEventListener('pointermove',move);
+  f.tr.addEventListener('pointerup',up);
+  f.tr.addEventListener('pointercancel',up);
+
+  // Mousewheel = nudge ±1 (Shift = ±10)
+  f.tr.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var ch=bank+f.idx+1, cur=overrides[ch]!==undefined?overrides[ch]:(live[ch-1]||0);
+    var step=e.shiftKey?10:1, dir=e.deltaY<0?1:-1;
+    var val=Math.max(0,Math.min(255,cur+dir*step));
+    overrides[ch]=val;
+    f.el.classList.add('man');
+    setVisual(f,val);
+    document.getElementById('acnt').textContent=Object.keys(overrides).length;
+    document.getElementById('warn').classList.toggle('on', !enabled && Object.keys(overrides).length>0);
+    send({ch:ch,val:val});
+  },{passive:false});
+
+  f.x.addEventListener('click',function(e){
+    e.stopPropagation();
+    var ch=bank+f.idx+1;
+    delete overrides[ch];
+    send({ch:ch,val:-1}).then(paint);
+  });
+}
+F.forEach(attach);
+
+// Toolbar wiring
+document.getElementById('bank').addEventListener('change',function(e){bank=parseInt(e.target.value,10);paint()});
+document.getElementById('enab').addEventListener('change',function(e){
+  enabled=e.target.checked;
+  document.getElementById('enabLbl').textContent=enabled?'ON':'OFF';
+  send({enabled:enabled});
+});
+document.getElementById('zero').addEventListener('click',function(){
+  var batch=[];
+  for(var i=0;i<32;i++){var ch=bank+i+1;overrides[ch]=0;batch.push({ch:ch,val:0})}
+  send({values:batch}).then(paint);
+});
+document.getElementById('full').addEventListener('click',function(){
+  var batch=[];
+  for(var i=0;i<32;i++){var ch=bank+i+1;overrides[ch]=255;batch.push({ch:ch,val:255})}
+  send({values:batch}).then(paint);
+});
+document.getElementById('release').addEventListener('click',function(){
+  if(!confirm('Release all manual overrides?'))return;
+  fetch('/api/manual/clear',{method:'POST'}).then(function(){overrides={};paint()});
+});
+
+// Repaint on window resize so thumb/fill geometry stays correct.
+window.addEventListener('resize',paint);
+
+// Initial state load
+fetch('/api/manual').then(function(r){return r.json()}).then(function(d){
+  enabled=!!d.enabled;
+  document.getElementById('enab').checked=enabled;
+  document.getElementById('enabLbl').textContent=enabled?'ON':'OFF';
+  overrides={};
+  if(d.overrides) for(var k in d.overrides) overrides[+k]=d.overrides[k];
+  paint();
+});
+
+// WS for live readout
+var ws;
+function connect(){
+  ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws.binaryType='arraybuffer';
+  ws.onopen=function(){document.getElementById('dot').classList.add('on')};
+  ws.onclose=function(){document.getElementById('dot').classList.remove('on');setTimeout(connect,2000)};
+  ws.onmessage=function(e){
+    if(typeof e.data==='string'){
+      try{var d=JSON.parse(e.data);if(d.manual){enabled=!!d.manual.enabled;document.getElementById('enab').checked=enabled;document.getElementById('enabLbl').textContent=enabled?'ON':'OFF'}}catch(x){}
+    } else {
+      live=new Uint8Array(e.data);
+      // Refresh sliders for non-overridden channels of current bank only.
+      for(var i=0;i<32;i++){
+        var ch=bank+i+1;
+        if(overrides[ch]===undefined) setVisual(F[i],live[ch-1]||0);
+      }
+    }
+  };
+}
+connect();
+</script>
+<div class="ver">v{{VERSION}} · {{BUILD_DATE}}</div>
+</body></html>
