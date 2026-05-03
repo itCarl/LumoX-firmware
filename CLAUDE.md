@@ -14,16 +14,15 @@ Singleton class `Lumox` — methods split thematically across `.cpp` files (patt
 Lumox::instance()
 ├── begin() / loop()       → Lumox.cpp     (init, FreeRTOS DMX task, tick loop)
 ├── beginNetwork()         → network.cpp   (WiFi STA/AP, mDNS, NVS config)
-├── beginEthernet()        → network.cpp   (W5500 SPI, DHCP, link watcher)
-├── pollArtNet()           → artnet.cpp    (WiFi UDP path)
-├── pollArtNetEth()        → artnet.cpp    (Ethernet UDP path)
-├── sendArtPollReply()     → artnet.cpp    (ArtPollReply on correct iface)
+├── beginEthernet()        → network.cpp   (W5500 via ETH.h, lwIP, event-driven)
+├── pollArtNet()           → artnet.cpp    (single lwIP socket, both netifs)
+├── sendArtPollReply()     → artnet.cpp    (per-netif directed broadcast)
 ├── beginDmx() / writeDmx()→ dmx.cpp       (esp_dmx, mutex-guarded)
 ├── snapshotDmx()          → dmx.cpp       (atomic read for web UI)
 └── beginWebServer()       → webserver.cpp (async HTTP, WS, DNS, OTA)
 ```
 
-Interface priority: **AP fallback > Ethernet > WiFi STA**. When ETH link + DHCP up → reply path prefers ETH (wired = more reliable).
+Interface priority: **AP fallback > Ethernet > WiFi STA**. WiFi + ETH share the lwIP stack — AsyncWebServer + Art-Net UDP work on both interfaces from a single socket. lwIP route table picks the egress netif per destination.
 
 ## File Layout
 
@@ -59,9 +58,7 @@ lumox-firmware/
 │
 ├── tools/cdata.js                ← Node.js: data/*.html → include/html_*.h (gzip) + version.h
 └── pio-scripts/
-    ├── build_ui.py               ← PIO pre-build: calls npm run build
-    └── patch_ethernet.py         ← PIO pre-build: patches arduino-libraries/Ethernet
-                                    (begin(uint16_t) override + ETHERNET_LARGE_BUFFERS)
+    └── build_ui.py               ← PIO pre-build: calls npm run build
 ```
 
 ## Hardware Pins (const.h)
@@ -132,9 +129,9 @@ If no OpSync arrives for 4 s → sync mode off, ArtDMX writes directly.
 ## Discovery
 
 ### ArtPoll
-- UDP 6454 on WiFi **and** ethernet
-- ArtPollReply contains the IP of the active interface (ethernet preferred)
-- Periodic unsolicited broadcast (`announceArtNetNode`) — controller picks up the node without an explicit discovery round
+- Single UDP 6454 socket bound to lwIP — receives on WiFi **and** ETH netifs simultaneously
+- ArtPollReply contains the IP of the active interface (ETH preferred over STA)
+- Periodic unsolicited broadcast (`announceArtNetNode`) sends to each netif's directed broadcast (`ETH.localIP() | ~ETH.subnetMask()`, same for WiFi) so both wired + wireless controllers see it
 
 ### mDNS
 - Service `_lumox._tcp` on port 80
@@ -160,9 +157,9 @@ If no OpSync arrives for 4 s → sync mode off, ArtDMX writes directly.
 | `/api/reboot` | POST |
 | `/api/reset` | POST: factory reset |
 | `/generate_204`, `/hotspot-detect.html`, `/ncsi.txt` … | captive-portal detection |
-| `ws://ip:81` | WebSocket: JSON status + binary DMX push |
+| `ws://ip/ws` | WebSocket: JSON status + binary DMX push (AsyncWebSocket on port 80) |
 
-WebSocket stays sync (`links2004/WebSockets`) on port 81 — loop tick is cheap.
+WebSocket uses ESPAsyncWebServer's `AsyncWebSocket` mounted on `/ws` — same TCP stack as HTTP, single port (80).
 
 ## Manual Override (control.html)
 
@@ -174,21 +171,21 @@ WebSocket stays sync (`links2004/WebSockets`) on port 81 — loop tick is cheap.
 
 Atomic int16 reads on ESP32 → no mutex needed. Occasional torn updates would be visually invisible.
 
-## Libraries (platformio.ini)
+## Platform / Libraries (platformio.ini)
+
+**Platform**: `pioarduino/platform-espressif32` v53.03.13 — community fork providing arduino-esp32 v3.x. Required for W5500 support in `ETH.h` (added in v3.0). Stock `espressif32@6.x` ships v2.x, which only supports built-in EMAC PHYs.
 
 | Library | Purpose |
 |---------|---------|
 | someweisguy/esp_dmx ^4.1 | DMX512 output |
 | bblanchon/ArduinoJson ^7.0 | JSON serialization |
-| links2004/WebSockets 2.6 | sync WebSocket server |
 | ayushsharma82/ElegantOTA ^3.1 | OTA firmware update (async) |
 | esp32async/AsyncTCP ^3.3.5 | async TCP for ESPAsyncWebServer |
-| esp32async/ESPAsyncWebServer ^3.7.10 | non-blocking HTTP server |
-| arduino-libraries/Ethernet | W5500 driver (patched via `patch_ethernet.py`) |
+| esp32async/ESPAsyncWebServer ^3.7.10 | non-blocking HTTP server + AsyncWebSocket |
+
+W5500 driver is built into arduino-esp32 v3.x (`ETH.begin(ETH_PHY_W5500, ...)`) — no external library needed.
 
 `build_flags`: `ELEGANTOTA_USE_ASYNC_WEBSERVER=1`, `WEBSOCKETS_USE_SSL=0`, `CORE_DEBUG_LEVEL=3`.
-
-⚠ `CONFIG_LWIP_UDP_RECVMBOX_SIZE` (default 6) **cannot** be raised via build_flags — arduino-esp32's lwIP is precompiled. Art-Net burst absorption on the WiFi path is therefore capped at 6 packets. Workaround: ethernet (W5500 has its own buffer management + ETHERNET_LARGE_BUFFERS = 8 KB/socket).
 
 ## Build
 
@@ -202,12 +199,6 @@ npm run build              # regenerate web UI + version.h only
 `tools/cdata.js` runs as PIO pre-build hook (`pio-scripts/build_ui.py`) and:
 1. gzips `data/*.html` → `include/html_*.h` as PROGMEM byte arrays
 2. reads `package.json` version → writes `include/version.h` (FW_VERSION_*, FW_BUILD_DATE)
-
-`patch_ethernet.py` patches the `arduino-libraries/Ethernet` library:
-1. `EthernetServer.h` — `begin(uint16_t)` override (compatible with AsyncWebServer API)
-2. `Ethernet.h` — `ETHERNET_LARGE_BUFFERS` enabled (8 KB RX/TX per socket vs 2 KB)
-
-Both idempotent — searches for anchor string, skips if already patched.
 
 ## Flicker Protection / Hardening
 
@@ -231,15 +222,15 @@ DMX output is structurally robust against packet loss and corruption:
 ## Typical Boot Sequence
 
 1. `loadConfig()` — read NVS (defaults on first boot)
-2. `beginNetwork()` — try STA → on failure AP fallback + captive portal
-3. `beginEthernet()` — W5500 detect → DHCP/static, link watcher starts
-4. `beginArtNet()` — open UDP 6454 on both interfaces
-5. `beginDmx()` — install esp_dmx driver, create mutex
-6. `beginWebServer()` — async HTTP + WS + DNS + OTA
+2. `beginEthernet()` — W5500 via ETH.h, register `_onEthEvent`, optional static config, brief link wait
+3. `beginNetwork()` — try STA (timeout shortened if ETH up) → on failure AP fallback + captive portal
+4. `beginWebServer()` — async HTTP + WS + DNS + OTA on lwIP (reachable on both netifs)
+5. `beginArtNet()` — open UDP 6454 (single lwIP socket → both netifs)
+6. `beginDmx()` — install esp_dmx driver, create mutex
 7. `_dmxTask` on core 1 — DMX continuously at ~44 Hz
 8. `loop()` on core 0:
-   - `pollArtNet()` + `pollArtNetEth()` (queue drain)
-   - `loopEthernet()` (link recheck, DHCP maintenance)
+   - `pollArtNet()` (queue drain — both netifs)
+   - `loopEthernet()` (no-op shim — ETH state runs on `_onEthEvent`)
    - `loopArtNet()` (periodic ArtPollReply, sync timeout)
    - `loopWebServer()` (DNS tick, WS push @ 5 Hz)
    - `_updateLed()` (status-LED pattern)

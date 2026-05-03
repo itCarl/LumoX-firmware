@@ -3,14 +3,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <ETH.h>
 #include <ESPAsyncWebServer.h>
-#include <WebSocketsServer.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <esp_dmx.h>
-#include <Ethernet.h>
-#include <EthernetUdp.h>
 #include "config.h"
 
 class Lumox {
@@ -30,6 +28,7 @@ public:
     // ── Network (network.cpp) ──────────────────────────────────────────────
     void        beginNetwork();
     void        beginEthernet();
+    String      networkHostname() const;   // mDNS + DHCP, MAC-derived, unique
     bool        isApMode()   const { return _apMode; }
     bool        isFallback() const { return _apFallback; }
     bool        isSta()      const { return !_apMode && WiFi.status() == WL_CONNECTED; }
@@ -57,9 +56,9 @@ public:
     void        announceArtNetNode();   // unsolicited ArtPollReply broadcast
 
     // ── Art-Net (artnet.cpp) ───────────────────────────────────────────────
+    // Single UDP socket binds to lwIP → receives on both WiFi + ETH netifs.
     void beginArtNet();
-    bool pollArtNet();      // WiFi UDP
-    bool pollArtNetEth();   // Ethernet UDP
+    bool pollArtNet();
     void sendArtPollReply(IPAddress target);
     void sendArtDiagData(IPAddress target, uint8_t priority, const char* text);
     void loopArtNet();      // periodic unsolicited broadcast, sync-mode timer
@@ -123,8 +122,7 @@ public:
     IPAddress cfgEthDns;
 
     // When true + ETH up → WiFi is turned off (STA + AP). When ETH goes down,
-    // WiFi is re-enabled automatically. Trade-off: web UI is unreachable while
-    // ETH is the active interface.
+    // WiFi is re-enabled automatically.
     bool      cfgWifiDisableOnEth = false;
 
     // ── Runtime stats ──────────────────────────────────────────────────────
@@ -166,14 +164,12 @@ private:
     Lumox() = default;
 
     // Art-Net
-    WiFiUDP      _udp;
-    EthernetUDP  _ethUdp;
+    WiFiUDP   _udp;
     uint8_t   _udpBuf[600] = {0};
     uint8_t   _lastSeq     = 0;              // last accepted Art-Net sequence byte
     IPAddress _lastSeqSender;                // sender for _lastSeq (per-source tracking)
     uint16_t  _nodeReportSeq = 0;            // rolling counter in ArtPollReply node report
     uint32_t  _identifyUntilMs = 0;          // ms until identify-blink ends (0 = off)
-    bool      _lastPacketFromEth = false;    // routes replies to correct UDP socket
     bool      _parseArtNet(const uint8_t* buf, int len, IPAddress sender);
     void      _handleArtAddress(const uint8_t* buf, int len, IPAddress sender);
     void      _handleArtCommand(const uint8_t* buf, int len, IPAddress sender);
@@ -181,7 +177,8 @@ private:
     void      _handleArtSync();
     bool      _dispatchArtNet(const uint8_t* buf, int len, IPAddress sender);
     void      _sendArtNetUdp(IPAddress target, uint16_t port,
-                             const uint8_t* buf, size_t len, bool forceEth = false);
+                             const uint8_t* buf, size_t len);
+    void      _broadcastArtPollReply(const uint8_t* buf, size_t len);
 
     // Shadow buffer for ArtSync mode. While in sync mode, incoming ArtDMX
     // writes to _dmxShadow; OpSync flips shadow → dmxBuffer atomically so all
@@ -214,30 +211,27 @@ private:
     bool _apMode      = true;    // Is AP mode currently active?
     bool _apFallback  = false;   // Is AP active because the STA connection failed?
 
-    // Ethernet (W5500 via arduino-libraries/Ethernet)
-    bool      _ethHw          = false;   // W5500 detected on SPI
-    bool      _ethUp          = false;   // link UP + DHCP lease
-    bool      _ethLinkUp      = false;   // last sampled raw link status (cached
-                                         // so async HTTP handlers don't hit SPI
-                                         // and race the main loop's W5500 ops)
+    // Ethernet (W5500 via arduino-esp32 v3.x ETH.h, lwIP-backed)
+    bool      _ethHw          = false;   // ETH.begin() succeeded (chip on SPI)
+    bool      _ethUp          = false;   // link UP + IP acquired (GOT_IP event)
+    bool      _ethLinkUp      = false;   // CONNECTED event seen (link, pre-IP)
     IPAddress _ethIp;
     uint8_t   _ethMac[6]      = {0};
-    uint32_t  _ethLastCheckMs = 0;
     uint32_t  _ethLastDbgMs   = 0;
-    uint32_t  _ethSpeedMbps   = 0;       // from PHYCFGR bit 1 (10 / 100)
-    bool      _ethFullDuplex  = false;   // from PHYCFGR bit 2
+    uint32_t  _ethSpeedMbps   = 0;       // ETH.linkSpeed() (10 / 100, 0 = down)
+    bool      _ethFullDuplex  = false;   // ETH.fullDuplex()
     bool      _wifiOff        = false;   // true while WiFi is suspended by ETH
-    void      _refreshEthPhy();          // reads PHYCFGR, updates cached fields
+    void      _onEthEvent(arduino_event_id_t event, arduino_event_info_t info);
     void      _applyWifiOnEthPolicy();   // enable/disable WiFi on ETH state change
 
-    // Webserver — AsyncWebServer runs HTTP on its own AsyncTCP task, so HTTP
-    // requests + OTA uploads no longer block the Art-Net poll. The WS push
-    // (links2004/WebSockets) stays sync on port 81 — the loop tick is cheap.
+    // Webserver — single AsyncWebServer + AsyncWebSocket on port 80.
+    // Both run on AsyncTCP's task, no loop tick needed for IO.
     AsyncWebServer    _http{WEB_SERVER_PORT};
-    WebSocketsServer  _ws{WS_PORT};
+    AsyncWebSocket    _ws{"/ws"};
     DNSServer         _dns;
     uint32_t          _lastWsPushMs = 0;
 
-    static void _onWsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
+    void _onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
+                    AwsEventType type, void* arg, uint8_t* data, size_t len);
     void _registerRoutes();
 };

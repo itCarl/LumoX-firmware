@@ -1,5 +1,28 @@
 #pragma once
 
+// ── Debug / verbose-print toggle ───────────────────────────────────────────
+// Set to 1 in `[env:debug]` (platformio.ini) → enables periodic status dumps
+// + verbose runtime logs. Set to 0 in production → those calls compile out
+// to ((void)0), saving flash and keeping the serial port quiet during shows.
+//
+// Use DEBUG_PRINT/PRINTLN/PRINTF for *periodic* or *high-volume* logs only.
+// Boot-time init prints (Serial.printf inside begin*() functions) and rare
+// events (sender-swap, OpAddress, factory reset) stay as plain Serial.printf
+// so the user can still diagnose problems on a misbehaving production node.
+#ifndef LUMOX_DEBUG
+#define LUMOX_DEBUG 0
+#endif
+
+#if LUMOX_DEBUG
+  #define DEBUG_PRINT(x)     Serial.print(x)
+  #define DEBUG_PRINTLN(x)   Serial.println(x)
+  #define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(x)     ((void)0)
+  #define DEBUG_PRINTLN(x)   ((void)0)
+  #define DEBUG_PRINTF(...)  ((void)0)
+#endif
+
 // ── DMX UART & MAX485 ──────────────────────────────────────────────────────
 // Wiring:
 //   TX_PIN  → MAX485 DI  (Data In)

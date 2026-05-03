@@ -132,7 +132,7 @@ and gzip-compresses `data/*.html` into PROGMEM headers.
 | `/update` | ElegantOTA firmware upload |
 
 Plus REST API: `/api/status`, `/api/dmx`, `/api/config`, `/api/manual`, `/api/manual/clear`, `/api/reboot`, `/api/reset`,
-and WebSocket on `ws://<ip>:81` (JSON status + binary DMX).
+and WebSocket on `ws://<ip>/ws` (JSON status + binary DMX).
 
 ---
 
@@ -203,8 +203,7 @@ lumox-firmware/
 ├── data/                      ← web UI (HTML, gzip-compressed at build time)
 ├── tools/cdata.js             ← web UI → PROGMEM headers
 └── pio-scripts/
-    ├── build_ui.py            ← pre-build: calls npm run build
-    └── patch_ethernet.py      ← pre-build: patches Ethernet lib
+    └── build_ui.py            ← pre-build: calls npm run build
 ```
 
 Architecture pattern: central singleton class `Lumox`, methods split thematically across `.cpp` files.
@@ -217,11 +216,11 @@ Architecture pattern: central singleton class `Lumox`, methods split thematicall
 |---|---|---|
 | [someweisguy/esp_dmx](https://github.com/someweisguy/esp_dmx) | ^4.1 | DMX512 output |
 | [bblanchon/ArduinoJson](https://github.com/bblanchon/ArduinoJson) | ^7.0 | JSON serialization |
-| [links2004/WebSockets](https://github.com/Links2004/arduinoWebSockets) | 2.6 | WebSocket server |
 | [ayushsharma82/ElegantOTA](https://github.com/ayushsharma82/ElegantOTA) | ^3.1 | OTA firmware update |
 | [esp32async/AsyncTCP](https://github.com/ESP32Async/AsyncTCP) | ^3.3.5 | async TCP stack |
-| [esp32async/ESPAsyncWebServer](https://github.com/ESP32Async/ESPAsyncWebServer) | ^3.7.10 | async HTTP server |
-| [arduino-libraries/Ethernet](https://github.com/arduino-libraries/Ethernet) | latest | W5500 driver (patched) |
+| [esp32async/ESPAsyncWebServer](https://github.com/ESP32Async/ESPAsyncWebServer) | ^3.7.10 | async HTTP server + AsyncWebSocket |
+
+W5500 driver is built into arduino-esp32 v3.x via `ETH.h` (`ETH.begin(ETH_PHY_W5500, ...)`). Platform pinned to [pioarduino/platform-espressif32](https://github.com/pioarduino/platform-espressif32) v53.03.13 since stock `espressif32@6.x` ships arduino-esp32 v2.x (no SPI ETH support).
 
 ---
 

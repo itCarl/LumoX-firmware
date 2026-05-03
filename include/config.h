@@ -32,10 +32,17 @@
 // reachable on WiFi while ETH carries the show traffic.
 #define DEFAULT_WIFI_OFF_ON_ETH false
 
+// W5500 INT pin connected with pullup? Compile-time switch — must match
+// hardware wiring. 0 = polling mode (irq=-1), bulletproof. 1 = use ETH_INT_PIN
+// for IRQ-driven link events. Default 0 because GPIO34 is input-only with no
+// internal pullup; a floating INT line blocks link-state events. Set to 1
+// only if you've wired an external pullup on ETH_INT_PIN, or moved INT to a
+// GPIO with a built-in pullup.
+#define ETH_USE_IRQ             0
+
 // ── Fixed settings (not editable via the web UI) ───────────────────────────
 #define ARTNET_UDP_PORT         6454
 #define WEB_SERVER_PORT         80
-#define WS_PORT                 81
 #define SERIAL_BAUD             115200
 
 // ── Firmware version (reported in ArtPollReply) ───────────────────────────

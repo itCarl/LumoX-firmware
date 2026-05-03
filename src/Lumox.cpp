@@ -13,11 +13,11 @@ void Lumox::begin() {
 
     loadConfig();          // from NVS (or defaults on first boot)
 
-    // Ethernet is the PREFERRED interface — probe + DHCP attempt before WiFi
+    // Ethernet is the PREFERRED interface — probe + IP acquire before WiFi
     // so beginNetwork() can shorten (or skip) the STA timeout when ETH is up.
     beginEthernet();
     beginNetwork();        // WiFi STA / AP fallback (informed by _ethUp)
-    beginWebServer();      // Web UI lives on WiFi only (Ethernet lib = own stack)
+    beginWebServer();      // AsyncWebServer binds to lwIP — reachable on WiFi + ETH
     beginArtNet();
     beginDmx();
 
@@ -32,10 +32,8 @@ void Lumox::begin() {
 }
 
 void Lumox::loop() {
-    // Receive Art-Net on both interfaces (any number of queued packets).
-    // ETH drains first so wired traffic has lower jitter than WiFi.
-    while (pollArtNetEth()) { /* drain */ }
-    while (pollArtNet())    { /* drain */ }
+    // Receive Art-Net — single lwIP socket drains both WiFi and ETH netifs.
+    while (pollArtNet()) { /* drain */ }
 
     // Drive WebSocket + DNS + OTA. AsyncWebServer no longer needs a loop tick
     // — it runs on AsyncTCP's own task — so HTTP requests + OTA uploads no
@@ -45,7 +43,8 @@ void Lumox::loop() {
     // Status LED (stale-link indicator)
     _updateLed();
 
-    // Ethernet plug/unplug detection + DHCP maintenance
+    // ETH plug/unplug + IP changes are event-driven via _onEthEvent() — kept
+    // as a no-op shim so the call site stays stable.
     loopEthernet();
 
     // Art-Net housekeeping: ArtSync timeout + periodic unsolicited announce.
@@ -56,16 +55,19 @@ void Lumox::loop() {
     // Periodic state push to all WebSocket clients (~5 Hz)
     if (now - _lastWsPushMs >= 200) {
         _lastWsPushMs = now;
-        if (_ws.connectedClients() > 0) pushStateToClients();
+        if (_ws.count() > 0) pushStateToClients();
     }
 
-    // Periodic ETH status dump — fast cadence until link+DHCP are up, then
-    // slow down. Helps diagnose "W5500 not showing up on the router".
+    // Periodic ETH status dump — debug builds only (LUMOX_DEBUG=1). Helps
+    // diagnose "W5500 not showing up on the router" on the bench. Production
+    // builds skip the timer entirely so loop() is one branch lighter.
+#if LUMOX_DEBUG
     const uint32_t dbgInterval = _ethUp ? 30000 : 5000;
     if (now - _ethLastDbgMs >= dbgInterval) {
         _ethLastDbgMs = now;
         debugEthStatus();
     }
+#endif
 
     // DMX-health change detector. Logs once on transition + every 10 s while
     // unhealthy — avoids serial spam but makes flicker causes visible.
@@ -88,7 +90,7 @@ void Lumox::loop() {
         lastDmxOk    = hh.ok;
         lastHealthMs = now;
     } else if (!hh.ok && now - lastHealthMs >= 10000) {
-        Serial.printf("[DMX] ⚠ still unclean: %s\n", hh.reason);
+        DEBUG_PRINTF("[DMX] ⚠ still unclean: %s\n", hh.reason);
         lastHealthMs = now;
     }
 }

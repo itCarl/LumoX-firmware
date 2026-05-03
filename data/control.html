@@ -252,7 +252,7 @@ fetch('/api/manual').then(function(r){return r.json()}).then(function(d){
 // WS for live readout
 var ws;
 function connect(){
-  ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws=new WebSocket('ws://'+location.host+'/ws');
   ws.binaryType='arraybuffer';
   ws.onopen=function(){document.getElementById('dot').classList.add('on')};
   ws.onclose=function(){document.getElementById('dot').classList.remove('on');setTimeout(connect,2000)};

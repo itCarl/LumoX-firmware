@@ -38,11 +38,11 @@ static constexpr uint8_t AC_CLEAR_OP0    = 0xE0;   // zero output universe 0
 static constexpr uint8_t NC_UNIVERSE     = 0x7F;
 
 void Lumox::beginArtNet() {
+    // Single lwIP socket bound to INADDR_ANY:6454 — receives on every netif
+    // (WiFi STA, AP, ETH). No per-interface socket needed.
     _udp.begin(ARTNET_UDP_PORT);
-    Serial.printf("[ArtNet] Listening on WiFi UDP:%d  (Universe %u)\n",
+    Serial.printf("[ArtNet] Listening on UDP:%d  (Universe %u)\n",
                   ARTNET_UDP_PORT, cfgUniverse);
-    // _ethUdp is started from beginEthernet() / loopEthernet() once DHCP is
-    // up — doing it here would open a socket on a not-yet-initialised W5500.
 }
 
 // Returns true whenever a packet was *consumed* from the socket — drain
@@ -53,22 +53,9 @@ void Lumox::beginArtNet() {
 bool Lumox::pollArtNet() {
     int len = _udp.parsePacket();
     if (len <= 0) return false;
-    _lastPacketFromEth = false;
 
     IPAddress sender = _udp.remoteIP();
     int read = _udp.read(_udpBuf, sizeof(_udpBuf));
-    _dispatchArtNet(_udpBuf, read, sender);
-    return true;
-}
-
-bool Lumox::pollArtNetEth() {
-    if (!_ethUp) return false;
-    int len = _ethUdp.parsePacket();
-    if (len <= 0) return false;
-    _lastPacketFromEth = true;
-
-    IPAddress sender = _ethUdp.remoteIP();
-    int read = _ethUdp.read(_udpBuf, sizeof(_udpBuf));
     _dispatchArtNet(_udpBuf, read, sender);
     return true;
 }
@@ -164,19 +151,53 @@ void Lumox::_handleArtSync() {
     }
 }
 
-// ── UDP send helper — picks WiFi or Ethernet socket based on context ──────
-// If the last received packet came via ETH, reply goes out on ETH. For
-// unsolicited / broadcast sends (forceEth=false, nothing received yet) we
-// prefer ETH when up, else WiFi — matches getIP() preference.
+// ── UDP send helper ────────────────────────────────────────────────────────
+// Single lwIP socket — route table picks the right netif based on dest IP.
+// Unicast replies to the controller's IP egress on whichever interface that
+// IP is reachable through (no per-packet bookkeeping needed).
 void Lumox::_sendArtNetUdp(IPAddress target, uint16_t port,
-                           const uint8_t* buf, size_t len, bool forceEth) {
-    const bool useEth = _ethUp && (forceEth || _lastPacketFromEth);
-    if (useEth) {
-        _ethUdp.beginPacket(target, port);
-        _ethUdp.write(buf, len);
-        _ethUdp.endPacket();
-    } else {
-        _udp.beginPacket(target, port);
+                           const uint8_t* buf, size_t len) {
+    _udp.beginPacket(target, port);
+    _udp.write(buf, len);
+    _udp.endPacket();
+}
+
+// Broadcast helper for unsolicited ArtPollReply. lwIP routes 255.255.255.255
+// out the default netif only — to ensure both WiFi and ETH controllers see
+// our announce, send to each interface's directed broadcast address.
+void Lumox::_broadcastArtPollReply(const uint8_t* buf, size_t len) {
+    auto bcastFor = [](IPAddress ip, IPAddress mask) -> IPAddress {
+        return IPAddress(ip[0] | (uint8_t)~mask[0],
+                         ip[1] | (uint8_t)~mask[1],
+                         ip[2] | (uint8_t)~mask[2],
+                         ip[3] | (uint8_t)~mask[3]);
+    };
+    bool sent = false;
+    if (_ethUp) {
+        IPAddress b = bcastFor(ETH.localIP(), ETH.subnetMask());
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (!_apMode && WiFi.status() == WL_CONNECTED) {
+        IPAddress b = bcastFor(WiFi.localIP(), WiFi.subnetMask());
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (_apMode) {
+        // AP fallback: only WiFi clients exist.
+        IPAddress b = bcastFor(WiFi.softAPIP(), IPAddress(255, 255, 255, 0));
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (!sent) {
+        // No netif up yet — limited broadcast as a last resort.
+        _udp.beginPacket(IPAddress(255, 255, 255, 255), ARTNET_UDP_PORT);
         _udp.write(buf, len);
         _udp.endPacket();
     }
@@ -299,15 +320,12 @@ void Lumox::sendArtPollReply(IPAddress target) {
     //   bit 6 : 15-bit port addressing
     reply[212] = _apMode ? 0x4D : 0x4F;
 
-    // Broadcasts to 255.255.255.255 = unsolicited announce — send via ETH too
-    // if up, so wired controllers discover us even on first boot.
-    const bool isBroadcast = (target == IPAddress(255, 255, 255, 255));
-    _sendArtNetUdp(target, ARTNET_UDP_PORT, reply, 239, /*forceEth=*/isBroadcast);
-    if (isBroadcast && _ethUp && !_lastPacketFromEth) {
-        // Also send via WiFi socket so WiFi-side controllers see the broadcast.
-        _udp.beginPacket(target, ARTNET_UDP_PORT);
-        _udp.write(reply, 239);
-        _udp.endPacket();
+    // Limited broadcast = unsolicited announce → send to every netif's
+    // directed broadcast so both WiFi and ETH controllers see it.
+    if (target == IPAddress(255, 255, 255, 255)) {
+        _broadcastArtPollReply(reply, 239);
+    } else {
+        _sendArtNetUdp(target, ARTNET_UDP_PORT, reply, 239);
     }
 }
 

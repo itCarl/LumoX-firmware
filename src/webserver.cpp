@@ -22,27 +22,29 @@ void Lumox::snapshotDmx(uint8_t* out512) {
     xSemaphoreGive(_dmxMutex);
 }
 
-// ── WebSocket events (static trampoline → instance) ─────────────────────────
-// Still using links2004/WebSockets on port 81 — push frequency is 5 Hz and
-// the loop tick is cheap, so an async migration here isn't worth the API churn.
+// ── WebSocket events (AsyncWebSocket on /ws) ────────────────────────────────
+// Mounted on the same AsyncWebServer as HTTP — port 80, path /ws.
+// Runs on AsyncTCP's task, no loop tick for IO. cleanupClients() is called
+// from loopWebServer() to drop dead sockets.
 
-void Lumox::_onWsEvent(uint8_t num, WStype_t type, uint8_t* /*payload*/, size_t /*length*/) {
-    auto& lx = Lumox::instance();
+void Lumox::_onWsEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClient* client,
+                       AwsEventType type, void* /*arg*/, uint8_t* /*data*/, size_t /*len*/) {
     switch (type) {
-        case WStype_CONNECTED:
-            Serial.printf("[WS] Client #%u connected\n", num);
+        case WS_EVT_CONNECT:
+            Serial.printf("[WS] Client #%u connected (%s)\n",
+                          client->id(), client->remoteIP().toString().c_str());
             // Send current state immediately so the dashboard doesn't blink
             // empty until the next 5 Hz broadcast.
             {
-                String json = lx.buildStatusJson();
-                lx._ws.sendTXT(num, json);
+                String json = buildStatusJson();
+                client->text(json);
                 uint8_t snap[512];
-                lx.snapshotDmx(snap);
-                lx._ws.sendBIN(num, snap, sizeof(snap));
+                snapshotDmx(snap);
+                client->binary(snap, sizeof(snap));
             }
             break;
-        case WStype_DISCONNECTED:
-            Serial.printf("[WS] Client #%u disconnected\n", num);
+        case WS_EVT_DISCONNECT:
+            Serial.printf("[WS] Client #%u disconnected\n", client->id());
             break;
         default:
             break;
@@ -328,21 +330,25 @@ void Lumox::_registerRoutes() {
 void Lumox::beginWebServer() {
     _registerRoutes();
 
+    // AsyncWebSocket mounted at /ws on the same HTTP server (port 80).
+    _ws.onEvent([this](AsyncWebSocket* s, AsyncWebSocketClient* c,
+                       AwsEventType t, void* a, uint8_t* d, size_t l) {
+        _onWsEvent(s, c, t, a, d, l);
+    });
+    _http.addHandler(&_ws);
+
     // ElegantOTA in async mode (ELEGANTOTA_USE_ASYNC_WEBSERVER=1) — mounts /update.
     ElegantOTA.begin(&_http);
 
     _http.begin();
-    Serial.printf("[Web] HTTP (async) on port %d\n", WEB_SERVER_PORT);
-
-    _ws.begin();
-    _ws.onEvent(_onWsEvent);
-    Serial.printf("[WS]  WebSocket on port %d\n", WS_PORT);
+    Serial.printf("[Web] HTTP (async) on port %d, WS on /ws\n", WEB_SERVER_PORT);
 }
 
 void Lumox::loopWebServer() {
-    // AsyncWebServer needs no loop tick — it runs on AsyncTCP's own task.
-    // WebSocket + DNS + OTA still need pumping from here.
-    _ws.loop();
+    // AsyncWebServer + AsyncWebSocket need no loop tick for IO — they run on
+    // AsyncTCP's task. cleanupClients() drops disconnected sockets so the
+    // tracking list doesn't grow unbounded.
+    _ws.cleanupClients();
     ElegantOTA.loop();
 
     if (_apMode) {
@@ -365,6 +371,10 @@ String Lumox::buildStatusJson() {
     net["ip"]      = getIP().toString();
     net["rssi"]    = getRssi();
     net["clients"] = getClients();
+    // Network hostname — MAC-derived, used for mDNS + DHCP. Decoupled from
+    // the user-friendly cfgDeviceName so multiple boards can share a label.
+    net["host"]    = networkHostname();
+    net["name"]    = cfgDeviceName;
 
     // STA sub-state (so dashboard can show both interfaces side-by-side)
     auto sta = net["sta"].to<JsonObject>();
@@ -373,11 +383,8 @@ String Lumox::buildStatusJson() {
     sta["ip"]   = staOn ? WiFi.localIP().toString() : String("");
     sta["rssi"] = staOn ? WiFi.RSSI()               : 0;
 
-    // Ethernet sub-state. All fields read cached values — never call into the
-    // arduino-libraries/Ethernet API here. AsyncWebServer dispatches /api/status
-    // on its own task; a direct W5500 SPI read from this context would race
-    // the main loop's parsePacket() / Ethernet.maintain() and corrupt SPI →
-    // bogus link-down readings flipping _ethUp false.
+    // Ethernet sub-state. State updated from ETH events (_onEthEvent), so
+    // these fields are always coherent with the active interface.
     auto eth = net["eth"].to<JsonObject>();
     eth["hw"]    = _ethHw;
     eth["up"]    = _ethUp;
@@ -439,11 +446,11 @@ String Lumox::buildStatusJson() {
 
 void Lumox::pushStateToClients() {
     String json = buildStatusJson();
-    _ws.broadcastTXT(json);
+    _ws.textAll(json);
 
     // Snapshot under mutex — concurrent Art-Net writes would otherwise
     // produce torn frames in the dashboard.
     uint8_t snap[512];
     snapshotDmx(snap);
-    _ws.broadcastBIN(snap, sizeof(snap));
+    _ws.binaryAll(snap, sizeof(snap));
 }

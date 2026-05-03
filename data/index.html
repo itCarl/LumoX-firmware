@@ -52,7 +52,8 @@ main{max-width:1400px;margin:0 auto;padding:16px;display:grid;grid-template-colu
       <div class="kv"><span>IP</span><span id="n-ip">—</span></div>
       <div class="kv"><span>RSSI</span><span id="n-rssi">—</span></div>
       <div class="kv"><span>Clients</span><span id="n-cli">—</span></div>
-      <div class="kv"><span>Hostname</span><span>lumox.local</span></div>
+      <div class="kv"><span>Hostname</span><span id="n-host">—</span></div>
+      <div class="kv"><span>Name</span><span id="n-name">—</span></div>
     </div>
   </div>
   <div class="card">
@@ -118,6 +119,8 @@ function doS(d){
   document.getElementById('n-ip').textContent=n.ip;
   document.getElementById('n-rssi').textContent=(n.mode=='STA')?(n.rssi+' dBm'):'—';
   document.getElementById('n-cli').textContent=n.mode=='AP'?n.clients:'—';
+  document.getElementById('n-host').textContent=n.host?n.host+'.local':'—';
+  document.getElementById('n-name').textContent=n.name||'—';
   // Interfaces card
   var sta=n.sta||{up:false},eth=n.eth||{up:false};
   document.getElementById('i-sta').innerHTML     = sta.up?'<span class="badge sta">UP</span> '+sta.rssi+' dBm':'<span class="badge down">DOWN</span>';
@@ -154,7 +157,7 @@ function doD(buf){
 }
 var ws;
 function connect(){
-  ws=new WebSocket('ws://'+location.hostname+':81/');
+  ws=new WebSocket('ws://'+location.host+'/ws');
   ws.binaryType='arraybuffer';
   ws.onopen=function(){document.getElementById('dot').classList.add('on')};
   ws.onclose=function(){document.getElementById('dot').classList.remove('on');setTimeout(connect,2000)};

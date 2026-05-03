@@ -4,7 +4,6 @@
 
 #include <SPI.h>
 #include <esp_mac.h>
-#include <utility/w5100.h>   // W5500 singleton exposes readPHYCFGR_W5500()
 
 // ── Config persistence via Preferences (NVS) ────────────────────────────────
 static const char* PREF_NAMESPACE = "lumox";
@@ -15,6 +14,16 @@ static String macSuffix() {
     char buf[8];
     snprintf(buf, sizeof(buf), "-%02X%02X", mac[4], mac[5]);
     return String(buf);
+}
+
+// Network hostname (mDNS + DHCP). Always derived from MAC, NEVER from the
+// user-editable cfgDeviceName — guarantees uniqueness when several nodes
+// share the same friendly name ("Stage Left" on multiple boards). Lower-case
+// per RFC 1035; only chars valid in DNS labels.
+String Lumox::networkHostname() const {
+    String s = String("lumox") + macSuffix();   // e.g. "lumox-A1B2"
+    s.toLowerCase();
+    return s;
 }
 
 void Lumox::loadConfig() {
@@ -83,14 +92,12 @@ void Lumox::factoryReset() {
 }
 
 // ── Register mDNS with Lumox service ────────────────────────────────────────
-static void registerMdns(const String& hostname, uint16_t universe, const String& deviceName) {
-    String mdnsName = hostname;
-    mdnsName.toLowerCase();
-    mdnsName.replace(' ', '-');
-
+// Hostname comes from networkHostname() (MAC-derived, always unique). The
+// human-friendly cfgDeviceName is published as the "name" TXT record — not
+// used for the DNS label.
+static void registerMdns(const String& mdnsName, uint16_t universe, const String& deviceName) {
     MDNS.begin(mdnsName.c_str());
     MDNS.addService("http",  "tcp", WEB_SERVER_PORT);
-    MDNS.addService("ws",    "tcp", WS_PORT);
     MDNS.addService("lumox", "tcp", WEB_SERVER_PORT);
 
     MDNS.addServiceTxt("lumox", "tcp", "name",     deviceName.c_str());
@@ -103,8 +110,8 @@ static void registerMdns(const String& hostname, uint16_t universe, const String
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     MDNS.addServiceTxt("lumox", "tcp", "mac", (const char*)macStr);
 
-    Serial.printf("[mDNS] %s.local  _lumox._tcp  (universe=%u)\n",
-                  mdnsName.c_str(), universe);
+    Serial.printf("[mDNS] %s.local  _lumox._tcp  (name=\"%s\" universe=%u)\n",
+                  mdnsName.c_str(), deviceName.c_str(), universe);
 }
 
 // ── Start network: ETH preferred → STA backup → AP fallback ────────────────
@@ -116,7 +123,7 @@ void Lumox::beginNetwork() {
     _apFallback = false;
 
     // Policy: "disable WiFi when ETH is connected" — skip WiFi bring-up
-    // entirely. mDNS is not available (Ethernet lib has its own stack).
+    // entirely. mDNS still works on ETH (lwIP single stack).
     if (cfgWifiDisableOnEth && _ethUp) {
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
@@ -137,7 +144,7 @@ void Lumox::beginNetwork() {
         Serial.printf("[Network] Connecting to \"%s\" (timeout %u ms, ETH %s)...",
                       cfgStaSsid.c_str(), staTimeout, _ethUp ? "up" : "down");
         WiFi.mode(WIFI_STA);
-        WiFi.setHostname(cfgDeviceName.c_str());
+        WiFi.setHostname(networkHostname().c_str());
         // Disable modem sleep — Art-Net is latency-sensitive (~22 ms/frame).
         // With sleep on, UDP packets see 100+ ms jitter → EFX stutter on WiFi.
         WiFi.setSleep(false);
@@ -164,7 +171,7 @@ void Lumox::beginNetwork() {
     // ETH or STA up = real network present, no AP captive portal needed.
     if (_ethUp || staConnected) {
         _apMode = false;
-        registerMdns(cfgDeviceName, cfgUniverse, cfgDeviceName);
+        registerMdns(networkHostname(), cfgUniverse, cfgDeviceName);
         Serial.printf("[Network] Active: %s%s%s  primary=%s\n",
                       _ethUp       ? "ETH" : "",
                       (_ethUp && staConnected) ? "+" : "",
@@ -186,31 +193,13 @@ void Lumox::beginNetwork() {
     _dns.setErrorReplyCode(DNSReplyCode::NoError);
     _dns.start(53, "*", WiFi.softAPIP());
 
-    registerMdns(cfgDeviceName, cfgUniverse, cfgDeviceName);
+    registerMdns(networkHostname(), cfgUniverse, cfgDeviceName);
 }
 
-// ── W5500 Ethernet (arduino-libraries/Ethernet) ────────────────────────────
-// Runs independently of WiFi. Shares nothing with lwIP — has its own TCP/IP
-// stack on the W5500 chip. We bring it up *after* WiFi so the WiFi boot path
-// isn't blocked by DHCP timeouts when the cable is unplugged.
-
-static const char* hwStatusName(EthernetHardwareStatus s) {
-    switch (s) {
-        case EthernetNoHardware: return "NO-HARDWARE";
-        case EthernetW5100:      return "W5100";
-        case EthernetW5200:      return "W5200";
-        case EthernetW5500:      return "W5500";
-        default:                 return "?";
-    }
-}
-
-static const char* linkStatusName(EthernetLinkStatus s) {
-    switch (s) {
-        case LinkON:  return "UP";
-        case LinkOFF: return "DOWN";
-        default:      return "UNKNOWN";
-    }
-}
+// ── W5500 Ethernet (arduino-esp32 v3.x ETH.h, lwIP-backed) ─────────────────
+// Single TCP/IP stack with WiFi → AsyncWebServer + Art-Net UDP work on both
+// interfaces from one socket. Driver is event-driven (CONNECTED / GOT_IP /
+// DISCONNECTED via WiFi.onEvent), no polling-loop / DHCP-maintain calls.
 
 void Lumox::beginEthernet() {
     // Derive a stable MAC from the ESP32 ETH efuse slot (W5500 has no burned-in MAC).
@@ -228,126 +217,134 @@ void Lumox::beginEthernet() {
     digitalWrite(ETH_RST_PIN, HIGH);
     delay(200);          // W5500 datasheet: ~50 ms, be generous
 
-    // Point the Ethernet library at our CS pin. SPI bus uses default VSPI
-    // pins on ESP32 (SCK=18, MISO=19, MOSI=23) — matches ETH_*_PIN macros.
-    Ethernet.init(ETH_CS_PIN);
+    // Subscribe to ETH lifecycle events before begin() so we don't miss the
+    // first CONNECTED / GOT_IP. Lambda forwards into the singleton instance.
+    WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info) {
+        Lumox::instance()._onEthEvent(event, info);
+    });
 
-    // Initial begin() probes the chip + acquires IP. Short DHCP timeout — if
-    // the cable is unplugged at boot, loopEthernet() picks it up later on
-    // plug-in. Static config skips DHCP entirely (near-instant bring-up).
-    int dhcpOk = 0;
-    if (cfgEthDhcp) {
-        Serial.println("[ETH] Using DHCP");
-        dhcpOk = Ethernet.begin(_ethMac, /*dhcp*/ 5000, /*resp*/ 2000);
-    } else if ((uint32_t)cfgEthIp != 0) {
-        Serial.printf("[ETH] Using STATIC  ip=%s gw=%s sub=%s dns=%s\n",
+    // arduino-esp32 v3.x: ETH.begin(phy_type, phy_addr, cs, irq, rst,
+    //                                spi_host, sck, miso, mosi).
+    //
+    // IRQ mode requires the W5500 INT line to idle HIGH — i.e. a pullup. ESP32
+    // GPIO34 (our default ETH_INT_PIN) is input-only and has no internal
+    // pullup, so without an external 10k pullup the line floats and link
+    // events never fire. Polling mode (irq = -1) is safe in all cases — driver
+    // periodically reads the PHY status register instead.
+    //
+    // ETH_USE_IRQ (config.h, compile-time): set to 1 only if INT pin has a
+    // pullup wired. Don't pre-call SPI.begin() — ETH driver inits SPI itself.
+#if ETH_USE_IRQ
+    const int irq = ETH_INT_PIN;
+    Serial.println("[ETH] IRQ mode: INT pin (build-time)");
+#else
+    const int irq = -1;
+    Serial.println("[ETH] IRQ mode: polling (build-time)");
+#endif
+    const bool ok = ETH.begin(ETH_PHY_W5500, LUMOX_ETH_PHY_ADDR,
+                              ETH_CS_PIN, irq, ETH_RST_PIN,
+                              SPI3_HOST,
+                              ETH_SCK_PIN, ETH_MISO_PIN, ETH_MOSI_PIN,
+                              ETH_SPI_CLK_MHZ);
+    _ethHw = ok;
+    if (!ok) {
+        Serial.println("[ETH] ETH.begin() failed — check SPI wiring + 3V3/GND + RST pin.");
+        return;
+    }
+
+    // Set hostname before DHCP so the lease appears as "lumox-xxyy" on the
+    // router. MAC-derived → always unique even when several boards share the
+    // same human-friendly cfgDeviceName.
+    ETH.setHostname(networkHostname().c_str());
+
+    // Static config: ETH.config() before DHCP attempt skips DHCP altogether.
+    if (!cfgEthDhcp && (uint32_t)cfgEthIp != 0) {
+        Serial.printf("[ETH] STATIC  ip=%s gw=%s sub=%s dns=%s\n",
                       cfgEthIp.toString().c_str(),
                       cfgEthGw.toString().c_str(),
                       cfgEthSub.toString().c_str(),
                       cfgEthDns.toString().c_str());
-        Ethernet.begin(_ethMac, cfgEthIp, cfgEthDns, cfgEthGw, cfgEthSub);
-        dhcpOk = 1;   // "success" — static has no async step
+        ETH.config(cfgEthIp, cfgEthGw, cfgEthSub, cfgEthDns);
+    } else if (!cfgEthDhcp) {
+        Serial.println("[ETH] STATIC mode enabled but no IP set — DHCP will run instead.");
     } else {
-        Serial.println("[ETH] STATIC mode enabled but no IP set — skipping bring-up.");
+        Serial.println("[ETH] Using DHCP");
     }
 
-    const EthernetHardwareStatus hw = Ethernet.hardwareStatus();
-    _ethHw = (hw == EthernetW5500 || hw == EthernetW5200 || hw == EthernetW5100);
-
-    Serial.printf("[ETH] probe: hardware=%s  link=%s  result=%s\n",
-                  hwStatusName(hw),
-                  linkStatusName(Ethernet.linkStatus()),
-                  dhcpOk ? "OK" : "failed/no-link");
-
-    if (!_ethHw) {
-        Serial.println("[ETH] W5500 not detected — check SPI wiring + 3V3/GND + RST pin.");
-        return;
+    // Wait briefly for link + IP at boot so beginNetwork() can shorten the
+    // STA timeout when ETH is already up. State machine continues async via
+    // _onEthEvent() if the cable is unplugged at boot.
+    const uint32_t start = millis();
+    while (!_ethUp && millis() - start < ETH_LINK_WAIT_MS) {
+        delay(50);
     }
-
-    if (dhcpOk) {
-        _ethIp = Ethernet.localIP();
-        _ethUp = true;
-        _ethLinkUp = true;
-        _ethUdp.begin(ARTNET_UDP_PORT);
-        _refreshEthPhy();
-        Serial.printf("[ETH] UP  IP=%s  GW=%s  SUB=%s  DNS=%s  (%u Mbps %s-duplex)\n",
-                      _ethIp.toString().c_str(),
-                      Ethernet.gatewayIP().toString().c_str(),
-                      Ethernet.subnetMask().toString().c_str(),
-                      Ethernet.dnsServerIP().toString().c_str(),
-                      _ethSpeedMbps,
-                      _ethFullDuplex ? "full" : "half");
-    } else {
-        Serial.println("[ETH] DHCP not acquired at boot — will retry on link-up event.");
+    if (!_ethUp) {
+        Serial.println("[ETH] No link/IP yet — will continue async on plug-in.");
     }
-    _ethLastCheckMs = millis();
 }
 
-// Called from loop() every tick. Detects link plug/unplug, retries DHCP, and
-// services the Ethernet library's internal DHCP-renewal + socket housekeeping.
-void Lumox::loopEthernet() {
-    if (!_ethHw) return;                      // no point polling if no chip
+// ETH state machine — called from WiFi.onEvent() lambda. lwIP gives us four
+// transitions of interest; everything else is logged through CORE_DEBUG.
+void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/) {
+    switch (event) {
+        case ARDUINO_EVENT_ETH_START:
+            Serial.println("[ETH] driver started");
+            break;
 
-    const uint32_t now = millis();
-    if (now - _ethLastCheckMs < 500) return;  // 2 Hz is enough
-    _ethLastCheckMs = now;
-
-    const EthernetLinkStatus ls = Ethernet.linkStatus();
-    // Tri-state: LinkON / LinkOFF / Unknown. Treat Unknown as "no change" —
-    // a noisy SPI read can return Unknown momentarily and flipping _ethUp
-    // false on it would tear down the working interface for no reason.
-    const bool linkUp   = (ls == LinkON);
-    const bool linkDown = (ls == LinkOFF);
-    if (linkUp || linkDown) _ethLinkUp = linkUp;
-
-    if (linkUp && !_ethUp) {
-        // Link just came up (or first time after boot with cable plugged).
-        bool ok;
-        if (cfgEthDhcp) {
-            Serial.println("[ETH] link UP detected — requesting DHCP...");
-            ok = Ethernet.begin(_ethMac, /*dhcp*/ 6000, /*resp*/ 2000) != 0;
-        } else if ((uint32_t)cfgEthIp != 0) {
-            Serial.printf("[ETH] link UP detected — applying STATIC %s\n",
-                          cfgEthIp.toString().c_str());
-            Ethernet.begin(_ethMac, cfgEthIp, cfgEthDns, cfgEthGw, cfgEthSub);
-            ok = true;
-        } else {
-            Serial.println("[ETH] link UP but STATIC IP unset — skipping");
-            ok = false;
-        }
-        if (ok) {
-            _ethIp = Ethernet.localIP();
-            _ethUp = true;
-            _ethUdp.stop();                   // re-open UDP on new interface
-            _ethUdp.begin(ARTNET_UDP_PORT);
-            _refreshEthPhy();
-            Serial.printf("[ETH] UP (%s)  IP=%s  GW=%s  (%u Mbps %s-duplex)\n",
-                          cfgEthDhcp ? "DHCP" : "STATIC",
-                          _ethIp.toString().c_str(),
-                          Ethernet.gatewayIP().toString().c_str(),
+        case ARDUINO_EVENT_ETH_CONNECTED:
+            _ethLinkUp     = true;
+            _ethSpeedMbps  = ETH.linkSpeed();
+            _ethFullDuplex = ETH.fullDuplex();
+            Serial.printf("[ETH] link UP  (%u Mbps %s-duplex)\n",
                           _ethSpeedMbps,
                           _ethFullDuplex ? "full" : "half");
-            announceArtNetNode();             // tell controllers we moved
-        } else if (cfgEthDhcp) {
-            Serial.println("[ETH] DHCP failed — retrying in 500 ms");
+            break;
+
+        case ARDUINO_EVENT_ETH_GOT_IP: {
+            _ethIp = ETH.localIP();
+            _ethUp = true;
+            Serial.printf("[ETH] UP  IP=%s  GW=%s  SUB=%s  DNS=%s\n",
+                          _ethIp.toString().c_str(),
+                          ETH.gatewayIP().toString().c_str(),
+                          ETH.subnetMask().toString().c_str(),
+                          ETH.dnsIP().toString().c_str());
+            _applyWifiOnEthPolicy();
+            announceArtNetNode();
+            break;
         }
-    }
-    else if (linkDown && _ethUp) {
-        Serial.println("[ETH] link DOWN — falling back to WiFi for Art-Net");
-        _ethUp = false;
-        _ethLinkUp = false;
-        _ethSpeedMbps  = 0;
-        _ethFullDuplex = false;
-        _ethUdp.stop();
-        announceArtNetNode();                 // updated IP for controllers
-    }
 
-    // Apply WiFi-on-ETH policy after any ETH state transition (or always —
-    // it's a no-op when the desired state already matches).
-    _applyWifiOnEthPolicy();
+        case ARDUINO_EVENT_ETH_LOST_IP:
+            Serial.println("[ETH] lost IP");
+            _ethUp = false;
+            announceArtNetNode();
+            _applyWifiOnEthPolicy();
+            break;
 
-    // DHCP lease renewal (no-op between renewal intervals; cheap to call often)
-    if (_ethUp) Ethernet.maintain();
+        case ARDUINO_EVENT_ETH_DISCONNECTED:
+            Serial.println("[ETH] link DOWN");
+            _ethUp         = false;
+            _ethLinkUp     = false;
+            _ethSpeedMbps  = 0;
+            _ethFullDuplex = false;
+            _applyWifiOnEthPolicy();
+            announceArtNetNode();
+            break;
+
+        case ARDUINO_EVENT_ETH_STOP:
+            Serial.println("[ETH] driver stopped");
+            _ethUp = false;
+            _ethLinkUp = false;
+            break;
+
+        default:
+            break;
+    }
+}
+
+// Kept as a thin compat shim — driver is event-driven, no per-tick work needed.
+// Called from loop(); cheap no-op so we don't have to ifdef the call site.
+void Lumox::loopEthernet() {
+    // intentionally empty — see _onEthEvent()
 }
 
 // Enforce cfgWifiDisableOnEth. Transitions:
@@ -372,25 +369,28 @@ void Lumox::_applyWifiOnEthPolicy() {
 }
 
 // Periodic serial dump — called from Lumox::loop() via debugEthStatus().
+// Compiled out in production (LUMOX_DEBUG=0) — used for bench debugging only.
 void Lumox::debugEthStatus() {
-    const EthernetHardwareStatus hw = Ethernet.hardwareStatus();
-    const EthernetLinkStatus     ls = Ethernet.linkStatus();
-    if (_ethUp) _refreshEthPhy();
-    Serial.printf("[ETH] status: hw=%s  link=%s  dhcp=%s  ip=%s  phy=%uMbps/%s\n",
-                  hwStatusName(hw),
-                  linkStatusName(ls),
-                  _ethUp ? "YES" : "NO",
-                  _ethUp ? _ethIp.toString().c_str() : "—",
-                  _ethSpeedMbps,
-                  _ethFullDuplex ? "FDX" : "HDX");
-
-    if (hw == EthernetNoHardware) {
-        Serial.println("[ETH]   no chip on SPI — wiring (MOSI/MISO/SCK/CS), power, RST?");
-    } else if (ls == LinkOFF) {
-        Serial.println("[ETH]   chip OK but no link — cable unplugged, switch port dead, or MDI mismatch?");
-    } else if (ls == LinkON && !_ethUp) {
-        Serial.println("[ETH]   link UP but no DHCP lease — router not serving on this VLAN, or MAC filtered?");
+#if LUMOX_DEBUG
+    if (_ethUp) {
+        _ethSpeedMbps  = ETH.linkSpeed();
+        _ethFullDuplex = ETH.fullDuplex();
     }
+    DEBUG_PRINTF("[ETH] status: hw=%s  link=%s  ip=%s  phy=%uMbps/%s\n",
+          _ethHw     ? "OK"  : "NO-HARDWARE",
+          _ethLinkUp ? "UP"  : "DOWN",
+          _ethUp     ? _ethIp.toString().c_str() : "—",
+          _ethSpeedMbps,
+          _ethFullDuplex ? "FDX" : "HDX");
+
+    if (!_ethHw) {
+        DEBUG_PRINTLN("[ETH]   driver not started — wiring (MOSI/MISO/SCK/CS), power, RST?");
+    } else if (!_ethLinkUp) {
+        DEBUG_PRINTLN("[ETH]   chip OK but no link — cable unplugged, switch port dead, or MDI mismatch?");
+    } else if (_ethLinkUp && !_ethUp) {
+        DEBUG_PRINTLN("[ETH]   link UP but no IP — DHCP server not responding, or static IP misconfigured?");
+    }
+#endif
 }
 
 // ── Unsolicited ArtPollReply broadcast ────────────────────────────────────
@@ -400,19 +400,6 @@ void Lumox::announceArtNetNode() {
     sendArtPollReply(IPAddress(255, 255, 255, 255));
     Serial.printf("[ArtNet] Unsolicited ArtPollReply broadcast — reporting IP %s\n",
                   getIP().toString().c_str());
-}
-
-// Read W5500 PHYCFGR (common register 0x002E) to extract link speed + duplex.
-// arduino-libraries/Ethernet exposes this via the W5100 singleton but doesn't
-// surface it as a public Ethernet API — read it directly.
-//   bit 2: DPX (1=full, 0=half)
-//   bit 1: SPD (1=100M, 0=10M)
-//   bit 0: LNK (1=up)
-void Lumox::_refreshEthPhy() {
-    if (!_ethHw) return;
-    const uint8_t phy = W5100.readPHYCFGR_W5500();
-    _ethSpeedMbps  = (phy & 0x02) ? 100 : 10;
-    _ethFullDuplex = (phy & 0x04) != 0;
 }
 
 String Lumox::getEthMac() const {
