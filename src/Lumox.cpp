@@ -13,6 +13,10 @@ void Lumox::begin() {
 
     loadConfig();          // from NVS (or defaults on first boot)
 
+    // Cache MAC once — efuse-backed, available before WiFi.begin(). Avoids
+    // a syscall on every ArtPollReply (poll storms hit this hot).
+    WiFi.macAddress(_macCached);
+
     // Ethernet is the PREFERRED interface — probe + IP acquire before WiFi
     // so beginNetwork() can shorten (or skip) the STA timeout when ETH is up.
     beginEthernet();
@@ -118,23 +122,35 @@ void Lumox::_updateLed() {
 
 // ── Manual override API ───────────────────────────────────────────────────
 // setManual: ch in [1..512], val in [0..255] = force; val = -1 = release.
-// Updates manualActive so the DMX task can short-circuit the overlay loop
-// when no overrides are in effect.
+// Maintains manualActiveBits + manualActiveCount in O(1) so batch POSTs of
+// dozens of channels no longer trigger a 512-iteration rescan per call.
 void Lumox::setManual(int ch, int val) {
     if (ch < 1 || ch > 512) return;
     if (val < -1 || val > 255) return;
+
+    const bool wasActive = (manualValue[ch] >= 0);
+    const bool nowActive = (val >= 0);
     manualValue[ch] = (int16_t)val;
 
-    bool any = false;
-    for (int i = 1; i <= 512; i++) {
-        if (manualValue[i] >= 0) { any = true; break; }
+    if (wasActive == nowActive) return;       // value-only change; bit unchanged
+
+    const uint32_t bit  = 1u << ((ch - 1) & 31);
+    const int      word = (ch - 1) >> 5;
+    if (nowActive) {
+        manualActiveBits[word] |= bit;
+        manualActiveCount++;
+    } else {
+        manualActiveBits[word] &= ~bit;
+        manualActiveCount--;
     }
-    manualActive = any;
+    manualActive = (manualActiveCount > 0);
 }
 
 void Lumox::clearAllManual() {
-    for (int i = 0; i <= 512; i++) manualValue[i] = -1;
-    manualActive = false;
+    for (auto& v : manualValue)        v = -1;
+    for (auto& w : manualActiveBits)   w =  0;
+    manualActiveCount = 0;
+    manualActive      = false;
 }
 
 void Lumox::setManualEnabled(bool on) {
@@ -164,19 +180,30 @@ void Lumox::_dmxTask(void* param) {
         if (lockUs > ctrl.statsDmxMaxMutexUs) ctrl.statsDmxMaxMutexUs = lockUs;
 
         // Manual override overlay — applied AFTER the Art-Net snapshot so
-        // user-driven channels win over incoming ArtDMX. Skipped unless the
-        // master toggle is on AND at least one channel is overridden, so
-        // pure Art-Net flow has zero overhead in the TX path.
+        // user-driven channels win over incoming ArtDMX. Iterates the active
+        // bitmap (set bits only) — sparse overrides skip the 512-channel scan.
         uint16_t txLen = ctrl.dmxChannelCount;
         if (ctrl.manualEnabled && ctrl.manualActive) {
             txLen = 512;                    // ensure manual slots are sent
-            for (int i = 1; i <= 512; i++) {
-                int16_t m = ctrl.manualValue[i];
-                if (m >= 0) frame[i] = (uint8_t)m;
+            for (int w = 0; w < 16; w++) {
+                uint32_t bits = ctrl.manualActiveBits[w];
+                while (bits) {
+                    const int b  = __builtin_ctz(bits);
+                    bits        &= bits - 1;
+                    const int ch = (w << 5) + b + 1;     // [1..512]
+                    const int16_t m = ctrl.manualValue[ch];
+                    if (m >= 0) frame[ch] = (uint8_t)m;  // re-check vs torn write
+                }
             }
         }
 
-        ctrl.writeDmx(frame, txLen);
+        // Zero the slots beyond txLen to preserve the prior partial-frame
+        // semantics (controller sends 100 ch → channels 101..512 transmit 0).
+        // dmxBuffer keeps last values, so without this we'd send stale data.
+        if (txLen < 512) memset(&frame[txLen + 1], 0, 512 - txLen);
+        frame[0] = 0;                       // start code (defensive)
+
+        ctrl.writeDmx(frame);
         // writeDmx blocks until the frame is fully sent (~22 ms)
 
         // Rolling frame-rate measurement — recomputed every RATE_SAMPLE_FRAMES.

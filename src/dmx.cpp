@@ -25,23 +25,19 @@ void Lumox::beginDmx() {
 }
 
 // Writes a full DMX frame and blocks until it has been sent.
-// Called exclusively from the FreeRTOS DMX task.
+// Called exclusively from the FreeRTOS DMX task. Caller owns `frame` (513 B,
+// [0]=0x00, [1..512]=channels) — no extra zero/memcpy on the hot path.
 //
 // Return-value checks matter for flicker: dmx_send() returning 0 means the
 // frame never hit the wire (driver queue full / misconfig). dmx_wait_sent()
 // returning false means the UART didn't drain within the timeout — the next
 // frame would start before the current one completes, corrupting break/MAB
 // timing. Both increment error counters; a running streak drives dmxHealth().
-void Lumox::writeDmx(const uint8_t* data, uint16_t length) {
+void Lumox::writeDmx(uint8_t* frame) {
     if (!_dmxReady) {
         vTaskDelay(pdMS_TO_TICKS(20));      // DMX disabled — idle task
         return;
     }
-    if (length > 512) length = 512;
-
-    // dmx_write expects 513 bytes: [0] = start code, [1..512] = channels
-    uint8_t frame[DMX_PACKET_SIZE] = {0};
-    memcpy(&frame[1], &data[1], length);   // data[0] is already 0x00
 
     dmx_write(_dmxPort, frame, DMX_PACKET_SIZE);
     const size_t sent      = dmx_send(_dmxPort);

@@ -68,7 +68,10 @@ public:
 
     // ── DMX output (dmx.cpp) ──────────────────────────────────────────────
     void beginDmx();
-    void writeDmx(const uint8_t* data, uint16_t length);
+    // Caller supplies a fully-prepared 513-byte frame ([0]=start code 0x00,
+    // [1..512]=channels). writeDmx hands it directly to esp_dmx — no inner
+    // copy or zero — so the ~44 Hz TX path runs without extra allocation.
+    void writeDmx(uint8_t* frame);
 
     // Mutex-guarded read of the 512 active DMX slots into out512. Use this
     // from webserver/WS code to avoid torn reads while the parser writes.
@@ -104,6 +107,12 @@ public:
     void     setManual(int ch, int val);   // val = -1 → release that channel
     void     clearAllManual();
     void     setManualEnabled(bool on);
+
+    // Active-channel bitmap — bit (ch-1) is set when manualValue[ch] >= 0.
+    // _dmxTask iterates only set bits via __builtin_ctz, skipping the
+    // 512-channel scan when the override list is sparse (typical case).
+    uint32_t manualActiveBits[16] = {0};
+    uint16_t manualActiveCount    = 0;
 
     // ── Runtime config (loaded from NVS) ───────────────────────────────────
     // STA = normal mode (join configured WiFi).
@@ -166,6 +175,7 @@ private:
     // Art-Net
     WiFiUDP   _udp;
     uint8_t   _udpBuf[600] = {0};
+    uint8_t   _macCached[6] = {0};           // populated once in begin()
     uint8_t   _lastSeq     = 0;              // last accepted Art-Net sequence byte
     IPAddress _lastSeqSender;                // sender for _lastSeq (per-source tracking)
     uint16_t  _nodeReportSeq = 0;            // rolling counter in ArtPollReply node report

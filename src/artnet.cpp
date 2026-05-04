@@ -299,12 +299,8 @@ void Lumox::sendArtPollReply(IPAddress target) {
     // 200 : Style — StNode (0x00)
     reply[200] = 0x00;
 
-    // 201-206 : MAC
-    {
-        uint8_t mac[6];
-        WiFi.macAddress(mac);
-        memcpy(&reply[201], mac, 6);
-    }
+    // 201-206 : MAC (cached once at boot — see Lumox::begin)
+    memcpy(&reply[201], _macCached, 6);
 
     // 207-210 : BindIp (same as node IP for single-bind devices)
     reply[207] = ip[0]; reply[208] = ip[1]; reply[209] = ip[2]; reply[210] = ip[3];

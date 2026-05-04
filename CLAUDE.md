@@ -200,6 +200,29 @@ npm run build              # regenerate web UI + version.h only
 1. gzips `data/*.html` → `include/html_*.h` as PROGMEM byte arrays
 2. reads `package.json` version → writes `include/version.h` (FW_VERSION_*, FW_BUILD_DATE)
 
+## Versioning
+
+`package.json` `version` field is the **single source of truth**. SemVer `MAJOR.MINOR.PATCH`. `tools/cdata.js` derives `include/version.h` (`FW_VERSION_MAJOR/MINOR/PATCH`, `FW_VERSION_STRING` with git short hash) on every build. `FW_VERSION_MAJOR/MINOR` are also embedded in every ArtPollReply (bytes 16-17), so controllers see the bump.
+
+### When to bump
+
+| Change type | Bump |
+|---|---|
+| Bug fix, doc-only, internal refactor with no behavior change | **PATCH** (`0.4.0` → `0.4.1`) |
+| New feature, new web route, new Art-Net OpCode, NVS schema additions, performance work that alters timing/health output | **MINOR** (`0.4.0` → `0.5.0`) |
+| Breaking NVS layout (existing config wiped), pin remap, protocol-incompatible Art-Net change, removal of `/api/*` route | **MAJOR** (`0.4.0` → `1.0.0`) |
+
+Hot-path or hardening changes observable on `/health` (frame rate, mutex µs, sender swaps) → MINOR. Pure cleanup not visible on the wire or to controllers → PATCH.
+
+### How to bump
+
+1. Edit `package.json` → update `"version"`.
+2. `npm run build` (or just `pio run` — pre-build hook regenerates `version.h` + UI HTML headers).
+3. Commit `package.json` together with the code change. **Do not** commit `include/version.h` or `include/html_*.h` — generated artifacts, regenerated on every build.
+4. If NVS layout changed (new field in `loadConfig`/`saveConfig` or renamed key): note the migration in the commit message and bump at least MINOR. If existing keys are removed/repurposed → MAJOR.
+
+Web UI uses `{{VERSION}}` placeholders, substituted at build time — bumping `package.json` is enough; no separate HTML edit.
+
 ## Flicker Protection / Hardening
 
 DMX output is structurally robust against packet loss and corruption:
