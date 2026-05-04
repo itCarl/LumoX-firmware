@@ -3,7 +3,7 @@
 #include <ElegantOTA.h>
 
 void Lumox::begin() {
-    Serial.println("\n[Lumox] Booting...");
+    LOG_PRINTLN("\n[Lumox] Booting...");
 
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
@@ -32,7 +32,7 @@ void Lumox::begin() {
     }
 
     digitalWrite(LED_PIN, HIGH);
-    Serial.println("[Lumox] Ready.\n");
+    LOG_PRINTLN("[Lumox] Ready.\n");
 }
 
 void Lumox::loop() {
@@ -80,10 +80,10 @@ void Lumox::loop() {
     const DmxHealth hh = dmxHealth();
     if (hh.ok != lastDmxOk) {
         if (hh.ok) {
-            Serial.printf("[DMX] ✓ signal clean  frames=%u rate=%uHz\n",
+            LOG_PRINTF("[DMX] ✓ signal clean  frames=%u rate=%uHz\n",
                           (unsigned)statsDmxFramesSent, (unsigned)statsDmxRateHz);
         } else {
-            Serial.printf("[DMX] ⚠ UNCLEAN: %s  frames=%u rate=%uHz sendErr=%u waitTO=%u mutex=%uus\n",
+            LOG_PRINTF("[DMX] ⚠ UNCLEAN: %s  frames=%u rate=%uHz sendErr=%u waitTO=%u mutex=%uus\n",
                           hh.reason,
                           (unsigned)statsDmxFramesSent,
                           (unsigned)statsDmxRateHz,
@@ -94,7 +94,7 @@ void Lumox::loop() {
         lastDmxOk    = hh.ok;
         lastHealthMs = now;
     } else if (!hh.ok && now - lastHealthMs >= 10000) {
-        DEBUG_PRINTF("[DMX] ⚠ still unclean: %s\n", hh.reason);
+        LOG_PRINTF("[DMX] ⚠ still unclean: %s\n", hh.reason);
         lastHealthMs = now;
     }
 }
@@ -155,7 +155,7 @@ void Lumox::clearAllManual() {
 
 void Lumox::setManualEnabled(bool on) {
     manualEnabled = on;
-    Serial.printf("[Manual] master switch %s\n", on ? "ON" : "OFF");
+    LOG_PRINTF("[Manual] master switch %s\n", on ? "ON" : "OFF");
 }
 
 // ── FreeRTOS task: continuously transmits DMX (~44 Hz) ─────────────────────

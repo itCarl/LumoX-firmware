@@ -1,26 +1,29 @@
 #pragma once
 
-// ── Debug / verbose-print toggle ───────────────────────────────────────────
-// Set to 1 in `[env:debug]` (platformio.ini) → enables periodic status dumps
-// + verbose runtime logs. Set to 0 in production → those calls compile out
-// to ((void)0), saving flash and keeping the serial port quiet during shows.
+// ── Serial-log toggle ──────────────────────────────────────────────────────
+// `[env:debug]` (platformio.ini) sets LUMOX_DEBUG=1 → all log macros expand
+// to Serial.* and `Serial.begin()` runs. Production `[env:esp32dev]` sets
+// LUMOX_DEBUG=0 → every log macro compiles to ((void)0) and the UART driver
+// is never started, so the serial port is genuinely silent during shows
+// (no half-formatted strings going to a closed port).
 //
-// Use DEBUG_PRINT/PRINTLN/PRINTF for *periodic* or *high-volume* logs only.
-// Boot-time init prints (Serial.printf inside begin*() functions) and rare
-// events (sender-swap, OpAddress, factory reset) stay as plain Serial.printf
-// so the user can still diagnose problems on a misbehaving production node.
+// All firmware logging — boot init, lifecycle events, error paths, periodic
+// dumps — goes through the LOG_* macros. There are no raw Serial.* calls in
+// the codebase (any newly added one will compile in prod and break silence).
 #ifndef LUMOX_DEBUG
 #define LUMOX_DEBUG 0
 #endif
 
 #if LUMOX_DEBUG
-  #define DEBUG_PRINT(x)     Serial.print(x)
-  #define DEBUG_PRINTLN(x)   Serial.println(x)
-  #define DEBUG_PRINTF(...)  Serial.printf(__VA_ARGS__)
+  #define LOG_BEGIN(b)       Serial.begin(b)
+  #define LOG_PRINT(x)       Serial.print(x)
+  #define LOG_PRINTLN(...)   Serial.println(__VA_ARGS__)
+  #define LOG_PRINTF(...)    Serial.printf(__VA_ARGS__)
 #else
-  #define DEBUG_PRINT(x)     ((void)0)
-  #define DEBUG_PRINTLN(x)   ((void)0)
-  #define DEBUG_PRINTF(...)  ((void)0)
+  #define LOG_BEGIN(b)       ((void)0)
+  #define LOG_PRINT(x)       ((void)0)
+  #define LOG_PRINTLN(...)   ((void)0)
+  #define LOG_PRINTF(...)    ((void)0)
 #endif
 
 // ── DMX UART & MAX485 ──────────────────────────────────────────────────────

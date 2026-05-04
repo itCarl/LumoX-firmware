@@ -31,7 +31,7 @@ void Lumox::_onWsEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClient* client,
                        AwsEventType type, void* /*arg*/, uint8_t* /*data*/, size_t /*len*/) {
     switch (type) {
         case WS_EVT_CONNECT:
-            Serial.printf("[WS] Client #%u connected (%s)\n",
+            LOG_PRINTF("[WS] Client #%u connected (%s)\n",
                           client->id(), client->remoteIP().toString().c_str());
             // Send current state immediately so the dashboard doesn't blink
             // empty until the next 5 Hz broadcast.
@@ -44,7 +44,7 @@ void Lumox::_onWsEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClient* client,
             }
             break;
         case WS_EVT_DISCONNECT:
-            Serial.printf("[WS] Client #%u disconnected\n", client->id());
+            LOG_PRINTF("[WS] Client #%u disconnected\n", client->id());
             break;
         default:
             break;
@@ -143,7 +143,7 @@ static void handleConfigBody(Lumox& lx, AsyncWebServerRequest* request,
 
     request->send(200, "application/json", "{\"ok\":true}");
 
-    Serial.println("[Config] Saved — rebooting in 1 s...");
+    LOG_PRINTLN("[Config] Saved — rebooting in 1 s...");
     // Reboot from a deferred task — restarting from inside the request lambda
     // would cut the response before the client receives it.
     xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); ESP.restart(); },
@@ -275,7 +275,7 @@ void Lumox::_registerRoutes() {
 
     _http.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", "{\"ok\":true}");
-        Serial.println("[System] Reboot requested.");
+        LOG_PRINTLN("[System] Reboot requested.");
         xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(500)); ESP.restart(); },
                     "rebootDelay", 2048, nullptr, 1, nullptr);
     });
@@ -345,7 +345,7 @@ void Lumox::beginWebServer() {
     ElegantOTA.begin(&_http);
 
     _http.begin();
-    Serial.printf("[Web] HTTP (async) on port %d, WS on /ws\n", WEB_SERVER_PORT);
+    LOG_PRINTF("[Web] HTTP (async) on port %d, WS on /ws\n", WEB_SERVER_PORT);
 }
 
 void Lumox::loopWebServer() {

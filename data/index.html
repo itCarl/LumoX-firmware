@@ -30,7 +30,12 @@ main{max-width:1400px;margin:0 auto;padding:16px;display:grid;grid-template-colu
 #dmx-grid{display:grid;grid-template-columns:repeat(32,1fr);gap:2px;padding:10px}
 .cl{background:#2e2e2e;color:#666;font:10px/1 monospace;text-align:center;padding:5px 2px;border-radius:2px}
 .cl.on{color:#111;font-weight:700}
-.ver{position:fixed;bottom:6px;left:8px;color:#555;font:10px/1 'Consolas',monospace;letter-spacing:.5px;pointer-events:none;z-index:5}
+#iface-bar{position:fixed;left:0;right:0;bottom:0;height:26px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;font:11px/1 'Consolas',monospace;letter-spacing:.8px;background:#2a2a2a;color:#888;border-top:1px solid #3a3a3a;z-index:50}
+#iface-bar.eth{background:#1a3a5a;color:#bfdcff;border-top-color:#2a5a8a}
+#iface-bar.sta{background:#1a4020;color:#b0f0c0;border-top-color:#2a6030}
+#iface-bar.ap{background:#5a3a00;color:#ffd890;border-top-color:#8a5a00}
+#iface-bar .ver{opacity:.7;color:inherit;font:inherit}
+body{padding-bottom:30px}
 </style></head><body>
 <header>
   <div class="brand">LUMOX</div>
@@ -168,5 +173,20 @@ function connect(){
 }
 connect();
 </script>
-<div class="ver">v{{VERSION}} · {{BUILD_DATE}}</div>
+<div id="iface-bar"><span id="iface-label">Detecting interface…</span><span class="ver">v{{VERSION}} · {{BUILD_DATE}}</span></div>
+<script>
+fetch('/api/status').then(r=>r.json()).then(d=>{
+  var n=d.net||{},host=location.hostname.toLowerCase();
+  var ethIp=(n.eth&&n.eth.ip)||'',staIp=(n.sta&&n.sta.ip)||'',apIp=n.apIp||'';
+  var mdns=((n.host||'')+'.local').toLowerCase();
+  var cls='',label='Unknown interface · '+host;
+  function tag(c,name){cls=c;label='Connected via '+name+' · '+host}
+  if(ethIp&&host===ethIp)tag('eth','ETHERNET');
+  else if(staIp&&host===staIp)tag('sta','WIFI (STA)');
+  else if(apIp&&host===apIp)tag('ap','WIFI (AP)');
+  else if(host===mdns){var m=(n.mode||'').toLowerCase();if(m==='eth')tag('eth','ETHERNET (mDNS)');else if(m==='sta')tag('sta','WIFI (STA, mDNS)');else if(m==='ap')tag('ap','WIFI (AP, mDNS)')}
+  document.getElementById('iface-bar').className=cls;
+  document.getElementById('iface-label').textContent=label;
+}).catch(()=>{});
+</script>
 </body></html>

@@ -55,7 +55,7 @@ void Lumox::loadConfig() {
 
     p.end();
 
-    Serial.printf("[Config] name=\"%s\"  universe=%u  staSsid=\"%s\"  ethDhcp=%d\n",
+    LOG_PRINTF("[Config] name=\"%s\"  universe=%u  staSsid=\"%s\"  ethDhcp=%d\n",
                   cfgDeviceName.c_str(), cfgUniverse, cfgStaSsid.c_str(), cfgEthDhcp);
 }
 
@@ -78,7 +78,7 @@ void Lumox::saveConfig() {
     p.putBool  ("wifiOffEth", cfgWifiDisableOnEth);
 
     p.end();
-    Serial.println("[Config] Saved to NVS.");
+    LOG_PRINTLN("[Config] Saved to NVS.");
 }
 
 void Lumox::factoryReset() {
@@ -86,7 +86,7 @@ void Lumox::factoryReset() {
     p.begin(PREF_NAMESPACE, /*readOnly*/ false);
     p.clear();
     p.end();
-    Serial.println("[Config] Factory reset — rebooting.");
+    LOG_PRINTLN("[Config] Factory reset — rebooting.");
     delay(200);
     ESP.restart();
 }
@@ -110,7 +110,7 @@ static void registerMdns(const String& mdnsName, uint16_t universe, const String
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     MDNS.addServiceTxt("lumox", "tcp", "mac", (const char*)macStr);
 
-    Serial.printf("[mDNS] %s.local  _lumox._tcp  (name=\"%s\" universe=%u)\n",
+    LOG_PRINTF("[mDNS] %s.local  _lumox._tcp  (name=\"%s\" universe=%u)\n",
                   mdnsName.c_str(), deviceName.c_str(), universe);
 }
 
@@ -132,7 +132,7 @@ void Lumox::beginNetwork() {
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
         _wifiOff = true;
-        Serial.println("[Network] ETH up + 'disable WiFi on ETH' set — WiFi suspended");
+        LOG_PRINTLN("[Network] ETH up + 'disable WiFi on ETH' set — WiFi suspended");
         return;
     }
     _wifiOff = false;
@@ -144,7 +144,7 @@ void Lumox::beginNetwork() {
 
     bool staConnected = false;
     if (cfgStaSsid.length() > 0) {
-        Serial.printf("[Network] Connecting to \"%s\" (timeout %u ms, ETH %s)...",
+        LOG_PRINTF("[Network] Connecting to \"%s\" (timeout %u ms, ETH %s)...",
                       cfgStaSsid.c_str(), staTimeout, _ethUp ? "up" : "down");
         WiFi.mode(WIFI_STA);
         WiFi.setHostname(networkHostname().c_str());
@@ -156,26 +156,26 @@ void Lumox::beginNetwork() {
         const uint32_t start = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - start < staTimeout) {
             delay(500);
-            Serial.print(".");
+            LOG_PRINT(".");
         }
-        Serial.println();
+        LOG_PRINTLN();
 
         staConnected = (WiFi.status() == WL_CONNECTED);
         if (staConnected) {
-            Serial.printf("[Network] STA connected  IP=%s  RSSI=%d dBm\n",
+            LOG_PRINTF("[Network] STA connected  IP=%s  RSSI=%d dBm\n",
                           WiFi.localIP().toString().c_str(), WiFi.RSSI());
         } else {
-            Serial.println("[Network] STA failed.");
+            LOG_PRINTLN("[Network] STA failed.");
         }
     } else {
-        Serial.println("[Network] No STA SSID configured.");
+        LOG_PRINTLN("[Network] No STA SSID configured.");
     }
 
     if (staConnected) {
         // STA up → no AP needed. ETH (if up) carries Art-Net; STA serves
         // browser config + mDNS discovery from the WiFi side.
         registerMdns(networkHostname(), cfgUniverse, cfgDeviceName);
-        Serial.printf("[Network] Active: %s%sSTA  primary=%s\n",
+        LOG_PRINTF("[Network] Active: %s%sSTA  primary=%s\n",
                       _ethUp ? "ETH+" : "",
                       "",
                       _ethUp ? "ETH" : "STA");
@@ -188,12 +188,12 @@ void Lumox::beginNetwork() {
     //                advertises ETH, captive portal works for AP clients.
     //   • ETH down → AP is the SOLE path (_apMode=true) → captive portal +
     //                getIP returns softAPIP for redirects.
-    Serial.printf("[Network] STA down — opening AP (%s).\n",
+    LOG_PRINTF("[Network] STA down — opening AP (%s).\n",
                   _ethUp ? "aux to ETH" : "primary fallback");
     WiFi.disconnect(true);
     WiFi.mode(WIFI_AP);
     WiFi.softAP(cfgApSsid.c_str(), cfgApPassword.c_str());
-    Serial.printf("[Network] AP started  SSID=\"%s\"  IP=%s\n",
+    LOG_PRINTF("[Network] AP started  SSID=\"%s\"  IP=%s\n",
                   cfgApSsid.c_str(),
                   WiFi.softAPIP().toString().c_str());
 
@@ -215,7 +215,7 @@ void Lumox::beginNetwork() {
 void Lumox::beginEthernet() {
     // Derive a stable MAC from the ESP32 ETH efuse slot (W5500 has no burned-in MAC).
     esp_read_mac(_ethMac, ESP_MAC_ETH);
-    Serial.printf("[ETH] Init W5500  CS=%d RST=%d  MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+    LOG_PRINTF("[ETH] Init W5500  CS=%d RST=%d  MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
                   ETH_CS_PIN, ETH_RST_PIN,
                   _ethMac[0], _ethMac[1], _ethMac[2],
                   _ethMac[3], _ethMac[4], _ethMac[5]);
@@ -247,10 +247,10 @@ void Lumox::beginEthernet() {
     // pullup wired. Don't pre-call SPI.begin() — ETH driver inits SPI itself.
 #if ETH_USE_IRQ
     const int irq = ETH_INT_PIN;
-    Serial.println("[ETH] IRQ mode: INT pin (build-time)");
+    LOG_PRINTLN("[ETH] IRQ mode: INT pin (build-time)");
 #else
     const int irq = -1;
-    Serial.println("[ETH] IRQ mode: polling (build-time)");
+    LOG_PRINTLN("[ETH] IRQ mode: polling (build-time)");
 #endif
     const bool ok = ETH.begin(ETH_PHY_W5500, LUMOX_ETH_PHY_ADDR,
                               ETH_CS_PIN, irq, ETH_RST_PIN,
@@ -259,7 +259,7 @@ void Lumox::beginEthernet() {
                               ETH_SPI_CLK_MHZ);
     _ethHw = ok;
     if (!ok) {
-        Serial.println("[ETH] ETH.begin() failed — check SPI wiring + 3V3/GND + RST pin.");
+        LOG_PRINTLN("[ETH] ETH.begin() failed — check SPI wiring + 3V3/GND + RST pin.");
         return;
     }
 
@@ -270,16 +270,16 @@ void Lumox::beginEthernet() {
 
     // Static config: ETH.config() before DHCP attempt skips DHCP altogether.
     if (!cfgEthDhcp && (uint32_t)cfgEthIp != 0) {
-        Serial.printf("[ETH] STATIC  ip=%s gw=%s sub=%s dns=%s\n",
+        LOG_PRINTF("[ETH] STATIC  ip=%s gw=%s sub=%s dns=%s\n",
                       cfgEthIp.toString().c_str(),
                       cfgEthGw.toString().c_str(),
                       cfgEthSub.toString().c_str(),
                       cfgEthDns.toString().c_str());
         ETH.config(cfgEthIp, cfgEthGw, cfgEthSub, cfgEthDns);
     } else if (!cfgEthDhcp) {
-        Serial.println("[ETH] STATIC mode enabled but no IP set — DHCP will run instead.");
+        LOG_PRINTLN("[ETH] STATIC mode enabled but no IP set — DHCP will run instead.");
     } else {
-        Serial.println("[ETH] Using DHCP");
+        LOG_PRINTLN("[ETH] Using DHCP");
     }
 
     // Wait briefly for link + IP at boot so beginNetwork() can shorten the
@@ -290,7 +290,7 @@ void Lumox::beginEthernet() {
         delay(50);
     }
     if (!_ethUp) {
-        Serial.println("[ETH] No link/IP yet — will continue async on plug-in.");
+        LOG_PRINTLN("[ETH] No link/IP yet — will continue async on plug-in.");
     }
 }
 
@@ -299,14 +299,14 @@ void Lumox::beginEthernet() {
 void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/) {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
-            Serial.println("[ETH] driver started");
+            LOG_PRINTLN("[ETH] driver started");
             break;
 
         case ARDUINO_EVENT_ETH_CONNECTED:
             _ethLinkUp     = true;
             _ethSpeedMbps  = ETH.linkSpeed();
             _ethFullDuplex = ETH.fullDuplex();
-            Serial.printf("[ETH] link UP  (%u Mbps %s-duplex)\n",
+            LOG_PRINTF("[ETH] link UP  (%u Mbps %s-duplex)\n",
                           _ethSpeedMbps,
                           _ethFullDuplex ? "full" : "half");
             break;
@@ -314,7 +314,7 @@ void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/)
         case ARDUINO_EVENT_ETH_GOT_IP: {
             _ethIp = ETH.localIP();
             _ethUp = true;
-            Serial.printf("[ETH] UP  IP=%s  GW=%s  SUB=%s  DNS=%s\n",
+            LOG_PRINTF("[ETH] UP  IP=%s  GW=%s  SUB=%s  DNS=%s\n",
                           _ethIp.toString().c_str(),
                           ETH.gatewayIP().toString().c_str(),
                           ETH.subnetMask().toString().c_str(),
@@ -325,14 +325,14 @@ void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/)
         }
 
         case ARDUINO_EVENT_ETH_LOST_IP:
-            Serial.println("[ETH] lost IP");
+            LOG_PRINTLN("[ETH] lost IP");
             _ethUp = false;
             announceArtNetNode();
             _applyWifiOnEthPolicy();
             break;
 
         case ARDUINO_EVENT_ETH_DISCONNECTED:
-            Serial.println("[ETH] link DOWN");
+            LOG_PRINTLN("[ETH] link DOWN");
             _ethUp         = false;
             _ethLinkUp     = false;
             _ethSpeedMbps  = 0;
@@ -342,7 +342,7 @@ void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/)
             break;
 
         case ARDUINO_EVENT_ETH_STOP:
-            Serial.println("[ETH] driver stopped");
+            LOG_PRINTLN("[ETH] driver stopped");
             _ethUp = false;
             _ethLinkUp = false;
             break;
@@ -365,7 +365,7 @@ void Lumox::_applyWifiOnEthPolicy() {
     const bool wantOff = cfgWifiDisableOnEth && _ethUp;
 
     if (wantOff && !_wifiOff) {
-        Serial.println("[WiFi] Disabling — ETH connected + policy active");
+        LOG_PRINTLN("[WiFi] Disabling — ETH connected + policy active");
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
         _wifiOff  = true;
@@ -375,7 +375,7 @@ void Lumox::_applyWifiOnEthPolicy() {
         MDNS.end();
     }
     else if (!wantOff && _wifiOff) {
-        Serial.println("[WiFi] Re-enabling — ETH gone or policy cleared");
+        LOG_PRINTLN("[WiFi] Re-enabling — ETH gone or policy cleared");
         _wifiOff = false;
         beginNetwork();   // re-runs STA/AP + mDNS
     }
@@ -389,7 +389,7 @@ void Lumox::debugEthStatus() {
         _ethSpeedMbps  = ETH.linkSpeed();
         _ethFullDuplex = ETH.fullDuplex();
     }
-    DEBUG_PRINTF("[ETH] status: hw=%s  link=%s  ip=%s  phy=%uMbps/%s\n",
+    LOG_PRINTF("[ETH] status: hw=%s  link=%s  ip=%s  phy=%uMbps/%s\n",
           _ethHw     ? "OK"  : "NO-HARDWARE",
           _ethLinkUp ? "UP"  : "DOWN",
           _ethUp     ? _ethIp.toString().c_str() : "—",
@@ -397,11 +397,11 @@ void Lumox::debugEthStatus() {
           _ethFullDuplex ? "FDX" : "HDX");
 
     if (!_ethHw) {
-        DEBUG_PRINTLN("[ETH]   driver not started — wiring (MOSI/MISO/SCK/CS), power, RST?");
+        LOG_PRINTLN("[ETH]   driver not started — wiring (MOSI/MISO/SCK/CS), power, RST?");
     } else if (!_ethLinkUp) {
-        DEBUG_PRINTLN("[ETH]   chip OK but no link — cable unplugged, switch port dead, or MDI mismatch?");
+        LOG_PRINTLN("[ETH]   chip OK but no link — cable unplugged, switch port dead, or MDI mismatch?");
     } else if (_ethLinkUp && !_ethUp) {
-        DEBUG_PRINTLN("[ETH]   link UP but no IP — DHCP server not responding, or static IP misconfigured?");
+        LOG_PRINTLN("[ETH]   link UP but no IP — DHCP server not responding, or static IP misconfigured?");
     }
 #endif
 }
@@ -411,7 +411,7 @@ void Lumox::debugEthStatus() {
 // controllers update their node list without an explicit discovery round.
 void Lumox::announceArtNetNode() {
     sendArtPollReply(IPAddress(255, 255, 255, 255));
-    Serial.printf("[ArtNet] Unsolicited ArtPollReply broadcast — reporting IP %s\n",
+    LOG_PRINTF("[ArtNet] Unsolicited ArtPollReply broadcast — reporting IP %s\n",
                   getIP().toString().c_str());
 }
 

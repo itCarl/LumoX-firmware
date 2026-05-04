@@ -10,6 +10,7 @@
 #include <ESPmDNS.h>
 #include <esp_dmx.h>
 #include "config.h"
+#include "const.h"   // LOG_* macros + hardware pin defs
 
 class Lumox {
 public:

@@ -41,7 +41,7 @@ void Lumox::beginArtNet() {
     // Single lwIP socket bound to INADDR_ANY:6454 — receives on every netif
     // (WiFi STA, AP, ETH). No per-interface socket needed.
     _udp.begin(ARTNET_UDP_PORT);
-    Serial.printf("[ArtNet] Listening on UDP:%d  (Universe %u)\n",
+    LOG_PRINTF("[ArtNet] Listening on UDP:%d  (Universe %u)\n",
                   ARTNET_UDP_PORT, cfgUniverse);
 }
 
@@ -93,7 +93,7 @@ bool Lumox::_dispatchArtNet(const uint8_t* buf, int len, IPAddress sender) {
                     if ((uint32_t)statsArtnetSender != 0) {
                         statsArtnetSenderSwaps++;
                         statsArtnetLastSwapMs = millis();
-                        Serial.printf("[ArtNet] ⚠ sender swap %s → %s (total %u)\n",
+                        LOG_PRINTF("[ArtNet] ⚠ sender swap %s → %s (total %u)\n",
                                       statsArtnetSender.toString().c_str(),
                                       sender.toString().c_str(),
                                       (unsigned)statsArtnetSenderSwaps);
@@ -425,7 +425,7 @@ void Lumox::loopArtNet() {
 
     if (statsInSyncMode && (now - statsArtSyncLastMs) > ART_SYNC_TIMEOUT_MS) {
         statsInSyncMode = false;
-        Serial.println("[ArtNet] ArtSync timeout — reverting to non-sync mode");
+        LOG_PRINTLN("[ArtNet] ArtSync timeout — reverting to non-sync mode");
         // Flush any pending shadow so we don't hold stale values.
         if (_dmxShadowDirty) {
             xSemaphoreTake(_dmxMutex, portMAX_DELAY);
@@ -484,7 +484,7 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
     switch (cmd) {
         case AC_LED_LOCATE:
             _identifyUntilMs = millis() + 10000;     // 10 s identify
-            Serial.println("[ArtNet] Identify (LED locate) 10 s");
+            LOG_PRINTLN("[ArtNet] Identify (LED locate) 10 s");
             break;
 
         case AC_LED_NORMAL:
@@ -496,7 +496,7 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
             xSemaphoreTake(_dmxMutex, portMAX_DELAY);
             memset(&dmxBuffer[1], 0, 512);
             xSemaphoreGive(_dmxMutex);
-            Serial.println("[ArtNet] ClearOp0 — DMX buffer zeroed");
+            LOG_PRINTLN("[ArtNet] ClearOp0 — DMX buffer zeroed");
             break;
         }
 
@@ -513,7 +513,7 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
 
     if (changed) {
         saveConfig();
-        Serial.printf("[ArtNet] OpAddress from %s: uni=%u name=\"%s\"\n",
+        LOG_PRINTF("[ArtNet] OpAddress from %s: uni=%u name=\"%s\"\n",
                       sender.toString().c_str(), cfgUniverse, cfgDeviceName.c_str());
     }
 
@@ -542,7 +542,7 @@ void Lumox::_handleArtCommand(const uint8_t* buf, int len, IPAddress sender) {
     cmd.toLowerCase();
     cmd.trim();
 
-    Serial.printf("[ArtNet] OpCommand from %s: \"%s\"\n",
+    LOG_PRINTF("[ArtNet] OpCommand from %s: \"%s\"\n",
                   sender.toString().c_str(), cmd.c_str());
 
     if (cmd.startsWith("clear")) {

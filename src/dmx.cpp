@@ -13,14 +13,14 @@ void Lumox::beginDmx() {
     const int personality_count = sizeof(personalities) / sizeof(personalities[0]);
 
     if (!dmx_driver_install(_dmxPort, &config, personalities, personality_count)) {
-        Serial.println("[DMX] driver install FAILED — DMX output disabled");
+        LOG_PRINTLN("[DMX] driver install FAILED — DMX output disabled");
         _dmxReady = false;
         return;
     }
     dmx_set_pin(_dmxPort, DMX_TX_PIN, DMX_RX_PIN, DMX_DE_PIN);
     _dmxReady = true;
 
-    Serial.printf("[DMX] Output on UART%d  TX=%d  RX=%d  DE=%d\n",
+    LOG_PRINTF("[DMX] Output on UART%d  TX=%d  RX=%d  DE=%d\n",
                   DMX_UART_PORT, DMX_TX_PIN, DMX_RX_PIN, DMX_DE_PIN);
 }
 
@@ -57,7 +57,7 @@ void Lumox::writeDmx(uint8_t* frame) {
         }
         // Warn once per streak of 3 — one-off errors are common on boot.
         if (statsDmxConsecErrors == 3) {
-            Serial.printf("[DMX] ⚠ consecutive send failures  send=%u waitTO=%u\n",
+            LOG_PRINTF("[DMX] ⚠ consecutive send failures  send=%u waitTO=%u\n",
                           (unsigned)statsDmxSendErrors,
                           (unsigned)statsDmxWaitTimeouts);
         }
