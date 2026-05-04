@@ -47,7 +47,9 @@ public:
     uint32_t    getEthSpeed() const { return _ethSpeedMbps; }    // 10 / 100 / 0
     bool        getEthFdx()   const { return _ethFullDuplex; }
     int         getRssi()     const { return _apMode ? 0 : WiFi.RSSI(); }
-    int         getClients()  const { return _apMode ? WiFi.softAPgetStationNum() : 0; }
+    // Count AP clients whenever softAP is up — including AP-aux mode where
+    // _apMode is false but a phone may still be connected via the AP for config.
+    int         getClients()  const { return _apActive ? WiFi.softAPgetStationNum() : 0; }
 
     // Called from loop() — detects link up/down, runs DHCP on plug-in,
     // maintains DHCP lease, and prints a periodic status line.
@@ -218,8 +220,16 @@ private:
     static void        _dmxTask(void* param);
 
     // Network
-    bool _apMode      = true;    // Is AP mode currently active?
-    bool _apFallback  = false;   // Is AP active because the STA connection failed?
+    // _apMode:    AP is the SOLE network path (no ETH, no STA). Used to gate
+    //             getIP() preference + captive-portal redirects when the only
+    //             way to reach the node is via the AP itself.
+    // _apActive:  softAP is up and serving — may coexist with ETH (AP-aux mode).
+    //             Drives DNS-server tick + captive-portal lambda + ArtPollReply
+    //             AP broadcast branch. Always true when _apMode is true.
+    // _apFallback: AP came up because STA failed (informational — shown on UI).
+    bool _apMode      = true;
+    bool _apActive    = true;
+    bool _apFallback  = false;
 
     // Ethernet (W5500 via arduino-esp32 v3.x ETH.h, lwIP-backed)
     bool      _ethHw          = false;   // ETH.begin() succeeded (chip on SPI)

@@ -114,12 +114,16 @@ static void registerMdns(const String& mdnsName, uint16_t universe, const String
                   mdnsName.c_str(), deviceName.c_str(), universe);
 }
 
-// ── Start network: ETH preferred → STA backup → AP fallback ────────────────
+// ── Start network: ETH preferred → STA → AP (always when STA down) ─────────
 // Called AFTER beginEthernet(), so _ethUp already reflects wired state.
-// Rule: any "real" interface (ETH or STA) skips AP fallback. ETH wins over
-// STA in getIP() preference, so when ETH is up, STA becomes pure backup.
+//
+// Rule: AP starts whenever STA is not up. With ETH up + STA down, AP runs as
+// an aux interface so a phone can still reach /config without unplugging the
+// cable (quick on-site reconfig). AP is "primary" (_apMode=true) only when
+// nothing else is up. cfgWifiDisableOnEth still wins — explicit user opt-out.
 void Lumox::beginNetwork() {
-    _apMode     = true;
+    _apMode     = false;
+    _apActive   = false;
     _apFallback = false;
 
     // Policy: "disable WiFi when ETH is connected" — skip WiFi bring-up
@@ -128,7 +132,6 @@ void Lumox::beginNetwork() {
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
         _wifiOff = true;
-        _apMode  = false;
         Serial.println("[Network] ETH up + 'disable WiFi on ETH' set — WiFi suspended");
         return;
     }
@@ -168,27 +171,35 @@ void Lumox::beginNetwork() {
         Serial.println("[Network] No STA SSID configured.");
     }
 
-    // ETH or STA up = real network present, no AP captive portal needed.
-    if (_ethUp || staConnected) {
-        _apMode = false;
+    if (staConnected) {
+        // STA up → no AP needed. ETH (if up) carries Art-Net; STA serves
+        // browser config + mDNS discovery from the WiFi side.
         registerMdns(networkHostname(), cfgUniverse, cfgDeviceName);
-        Serial.printf("[Network] Active: %s%s%s  primary=%s\n",
-                      _ethUp       ? "ETH" : "",
-                      (_ethUp && staConnected) ? "+" : "",
-                      staConnected ? "STA" : "",
+        Serial.printf("[Network] Active: %s%sSTA  primary=%s\n",
+                      _ethUp ? "ETH+" : "",
+                      "",
                       _ethUp ? "ETH" : "STA");
         return;
     }
 
-    Serial.println("[Network] No ETH or STA — falling back to AP + captive portal.");
-    _apFallback = true;
+    // STA down — open AP. Two flavours:
+    //   • ETH up   → AP runs *aux* to ETH (quick on-site reconfig path).
+    //                getIP() still returns ETH IP, ArtPollReply still
+    //                advertises ETH, captive portal works for AP clients.
+    //   • ETH down → AP is the SOLE path (_apMode=true) → captive portal +
+    //                getIP returns softAPIP for redirects.
+    Serial.printf("[Network] STA down — opening AP (%s).\n",
+                  _ethUp ? "aux to ETH" : "primary fallback");
     WiFi.disconnect(true);
-
     WiFi.mode(WIFI_AP);
     WiFi.softAP(cfgApSsid.c_str(), cfgApPassword.c_str());
     Serial.printf("[Network] AP started  SSID=\"%s\"  IP=%s\n",
                   cfgApSsid.c_str(),
                   WiFi.softAPIP().toString().c_str());
+
+    _apActive   = true;
+    _apMode     = !_ethUp;       // primary only when nothing else is up
+    _apFallback = !_ethUp;       // "fallback" only if ETH isn't carrying traffic
 
     _dns.setErrorReplyCode(DNSReplyCode::NoError);
     _dns.start(53, "*", WiFi.softAPIP());
@@ -357,8 +368,10 @@ void Lumox::_applyWifiOnEthPolicy() {
         Serial.println("[WiFi] Disabling — ETH connected + policy active");
         WiFi.disconnect(true);
         WiFi.mode(WIFI_OFF);
-        _wifiOff = true;
-        _apMode  = false;
+        _wifiOff  = true;
+        _apMode   = false;
+        _apActive = false;
+        _dns.stop();
         MDNS.end();
     }
     else if (!wantOff && _wifiOff) {

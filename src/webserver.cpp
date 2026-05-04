@@ -291,11 +291,12 @@ void Lumox::_registerRoutes() {
     // ── Captive-portal probe endpoints ─────────────────────────────────────
     // Each OS pings its own URL on WiFi connect. A response other than the
     // expected "success" makes the OS show a "Sign in to network" notification.
-    // Only act captively in AP fallback mode — in STA mode the ESP32 is on a
-    // normal network and must not hijack these probes.
+    // Captive fires whenever softAP is up (_apActive) — including AP-aux mode
+    // (ETH up + STA down + AP serving). Redirect uses softAPIP() explicitly so
+    // AP clients don't get pointed at the ETH address they can't reach.
     auto captive = [this](AsyncWebServerRequest* req) {
-        if (_apMode) sendCaptiveRedirect(req, getIP().toString());
-        else         req->send(204);
+        if (_apActive) sendCaptiveRedirect(req, WiFi.softAPIP().toString());
+        else           req->send(204);
     };
 
     // Android (Google Play Services + stock)
@@ -312,7 +313,10 @@ void Lumox::_registerRoutes() {
 
     // RFC 8908 — structured captive-portal API
     _http.on("/.well-known/captive-portal", HTTP_GET, [this](AsyncWebServerRequest* req) {
-        String portal = String("http://") + getIP().toString() + "/config";
+        // Use softAPIP for AP clients (incl. AP-aux mode) — they can't reach
+        // ETH/STA addresses. Otherwise advertise the primary IP.
+        const String host = _apActive ? WiFi.softAPIP().toString() : getIP().toString();
+        String portal = String("http://") + host + "/config";
         String body = String("{\"captive\":true,\"user-portal-url\":\"") + portal + "\"}";
         AsyncWebServerResponse* resp = req->beginResponse(200, "application/captive+json", body);
         resp->addHeader("Cache-Control", "private");
@@ -320,8 +324,8 @@ void Lumox::_registerRoutes() {
     });
 
     _http.onNotFound([this](AsyncWebServerRequest* req) {
-        if (_apMode) sendCaptiveRedirect(req, getIP().toString());
-        else         req->send(404, "text/plain", "Not found");
+        if (_apActive) sendCaptiveRedirect(req, WiFi.softAPIP().toString());
+        else           req->send(404, "text/plain", "Not found");
     });
 }
 
@@ -351,7 +355,7 @@ void Lumox::loopWebServer() {
     _ws.cleanupClients();
     ElegantOTA.loop();
 
-    if (_apMode) {
+    if (_apActive) {
         _dns.processNextRequest();
     }
 }
@@ -367,6 +371,8 @@ String Lumox::buildStatusJson() {
     const char* mode = _apMode ? "AP" : (_ethUp ? "ETH" : "STA");
     net["mode"]    = mode;
     net["fb"]      = _apFallback;
+    net["ap"]      = _apActive;       // AP-aux flag (true even when ETH primary)
+    net["apIp"]    = _apActive ? WiFi.softAPIP().toString() : String("");
     net["ssid"]    = _apMode ? cfgApSsid : cfgStaSsid;
     net["ip"]      = getIP().toString();
     net["rssi"]    = getRssi();

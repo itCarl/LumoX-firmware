@@ -187,8 +187,9 @@ void Lumox::_broadcastArtPollReply(const uint8_t* buf, size_t len) {
         _udp.endPacket();
         sent = true;
     }
-    if (_apMode) {
-        // AP fallback: only WiFi clients exist.
+    if (_apActive) {
+        // AP serving (fallback or aux to ETH). Send to AP subnet broadcast so
+        // any controller on the AP side (phone, laptop) sees the announce.
         IPAddress b = bcastFor(WiFi.softAPIP(), IPAddress(255, 255, 255, 0));
         _udp.beginPacket(b, ARTNET_UDP_PORT);
         _udp.write(buf, len);
