@@ -206,20 +206,22 @@ npm run build              # regenerate web UI + version.h only
 
 ### When to bump
 
-| Change type | Bump |
-|---|---|
-| Bug fix, doc-only, internal refactor with no behavior change | **PATCH** (`0.4.0` → `0.4.1`) |
-| New feature, new web route, new Art-Net OpCode, NVS schema additions, performance work that alters timing/health output | **MINOR** (`0.4.0` → `0.5.0`) |
-| Breaking NVS layout (existing config wiped), pin remap, protocol-incompatible Art-Net change, removal of `/api/*` route | **MAJOR** (`0.4.0` → `1.0.0`) |
+**Default: PATCH.** Bump the patch number on every committed change unless the change explicitly meets the MINOR or MAJOR bar below.
 
-Hot-path or hardening changes observable on `/health` (frame rate, mutex µs, sender swaps) → MINOR. Pure cleanup not visible on the wire or to controllers → PATCH.
+| Bump | When |
+|---|---|
+| **PATCH** (`0.6.0` → `0.6.1`) | Default for every change — bug fixes, refactors, perf work, new features, new web routes, new Art-Net OpCodes, NVS additions. |
+| **MINOR** (`0.6.x` → `0.7.0`) | A coherent batch of features ships together (release milestone), or behavior change worth flagging to controllers via the ArtPollReply minor byte. Author's call. |
+| **MAJOR** (`0.x.y` → `1.0.0`) | Breaking change: NVS layout wipe, pin remap, protocol-incompatible Art-Net change, removal of an `/api/*` route. |
+
+Don't agonise — just bump PATCH. MINOR is reserved for moments worth marking; MAJOR for breakage.
 
 ### How to bump
 
-1. Edit `package.json` → update `"version"`.
+1. Edit `package.json` → increment `"version"` (usually the patch digit).
 2. `npm run build` (or just `pio run` — pre-build hook regenerates `version.h` + UI HTML headers).
 3. Commit `package.json` together with the code change. **Do not** commit `include/version.h` or `include/html_*.h` — generated artifacts, regenerated on every build.
-4. If NVS layout changed (new field in `loadConfig`/`saveConfig` or renamed key): note the migration in the commit message and bump at least MINOR. If existing keys are removed/repurposed → MAJOR.
+4. If NVS layout changed (new field, renamed key, or removed key): note the migration in the commit message. Removed/repurposed keys → MAJOR.
 
 Web UI uses `{{VERSION}}` placeholders, substituted at build time — bumping `package.json` is enough; no separate HTML edit.
 
