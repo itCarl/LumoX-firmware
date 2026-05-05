@@ -179,6 +179,14 @@ void Lumox::_dmxTask(void* param) {
 
         if (lockUs > ctrl.statsDmxMaxMutexUs) ctrl.statsDmxMaxMutexUs = lockUs;
 
+        // Ring-buffer log of every spike above the threshold so /health can
+        // show a timeline of contention events, not just the high-water mark.
+        if (lockUs > Lumox::MUTEX_LOG_THRESHOLD_US) {
+            ctrl._mutexLog[ctrl._mutexLogHead] = { millis(), lockUs };
+            ctrl._mutexLogHead = (ctrl._mutexLogHead + 1) % Lumox::MUTEX_LOG_SIZE;
+            if (ctrl._mutexLogCount < Lumox::MUTEX_LOG_SIZE) ctrl._mutexLogCount++;
+        }
+
         // Manual override overlay — applied AFTER the Art-Net snapshot so
         // user-driven channels win over incoming ArtDMX. Iterates the active
         // bitmap (set bits only) — sparse overrides skip the 512-channel scan.
@@ -211,7 +219,9 @@ void Lumox::_dmxTask(void* param) {
             const uint32_t now   = millis();
             const uint32_t dt_ms = now - rateSampleStart;
             if (dt_ms > 0) {
-                ctrl.statsDmxRateHz = (rateSampleCount * 1000) / dt_ms;
+                const uint32_t hz10     = (rateSampleCount * 10000) / dt_ms;
+                ctrl.statsDmxRateHz     = hz10 / 10;
+                ctrl.statsDmxRateTenths = hz10 % 10;
             }
             rateSampleCount = 0;
             rateSampleStart = now;

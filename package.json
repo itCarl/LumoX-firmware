@@ -1,8 +1,13 @@
 {
   "name": "lumox-firmware",
-  "version": "0.6.4",
+  "version": "0.6.8",
   "private": true,
   "scripts": {
-    "build": "node tools/cdata.js"
+    "build": "node tools/cdata.js",
+    "stress": "node tools/stress/index.js",
+    "discover": "node tools/stress/discover.js"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.0"
   }
 }

@@ -430,7 +430,24 @@ String Lumox::buildStatusJson() {
     dmx["consecErr"]  = statsDmxConsecErrors;
     dmx["maxConsec"]  = statsDmxMaxConsecErr;
     dmx["rateHz"]     = statsDmxRateHz;
+    dmx["rateTenths"] = statsDmxRateTenths;
     dmx["maxMutexUs"] = statsDmxMaxMutexUs;
+
+    // Mutex-spike timeline (oldest → newest). Snapshot indices once so a
+    // concurrent _dmxTask write doesn't shift entries mid-emit.
+    auto mlog = dmx["mutexLog"].to<JsonArray>();
+    const uint8_t cnt   = _mutexLogCount;
+    const uint8_t head  = _mutexLogHead;
+    const uint8_t start = (head + MUTEX_LOG_SIZE - cnt) % MUTEX_LOG_SIZE;
+    const uint32_t now  = millis();
+    for (uint8_t i = 0; i < cnt; i++) {
+        const uint8_t idx = (start + i) % MUTEX_LOG_SIZE;
+        const auto& e = _mutexLog[idx];
+        auto o = mlog.add<JsonObject>();
+        o["t"]   = e.timeMs;
+        o["age"] = (now >= e.timeMs) ? (now - e.timeMs) : 0;
+        o["us"]  = e.durationUs;
+    }
 
     // System
     auto sys = doc["sys"].to<JsonObject>();

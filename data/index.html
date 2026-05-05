@@ -145,7 +145,7 @@ function doS(d){
   document.getElementById('s-chip').textContent=s.chip+' rev '+s.rev+' · '+s.cores+' cores';
   document.getElementById('s-flash').textContent=fB(s.flash);
   // DMX rate from health stats — falls back to nominal if unmeasured.
-  document.getElementById('d-rate').textContent=h.rateHz?h.rateHz+' Hz':'~44 Hz';
+  document.getElementById('d-rate').textContent=h.rateHz?(h.rateHz+'.'+(h.rateTenths||0)+' Hz'):'~44.0 Hz';
 }
 function doD(buf){
   var act=0,mx=0;

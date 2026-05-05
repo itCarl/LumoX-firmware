@@ -163,7 +163,8 @@ public:
     uint32_t  statsDmxConsecErrors  = 0;    // current consecutive error streak
     uint32_t  statsDmxMaxConsecErr  = 0;    // worst streak seen
     uint32_t  statsDmxLastFrameMs   = 0;
-    uint32_t  statsDmxRateHz        = 0;    // measured frame rate
+    uint32_t  statsDmxRateHz        = 0;    // measured frame rate (whole Hz)
+    uint32_t  statsDmxRateTenths    = 0;    // 0..9, fractional digit of rate
     uint32_t  statsDmxMaxMutexUs    = 0;    // worst mutex-take duration
 
     // Explicit health check — return true only if the signal is flicker-free.
@@ -171,6 +172,19 @@ public:
     // (empty when ok). Cheap — just reads counters.
     struct DmxHealth { bool ok; const char* reason; };
     DmxHealth dmxHealth() const;
+
+    // ── Mutex-spike ring buffer (debug aid) ────────────────────────────────
+    // Last N times the DMX task waited >MUTEX_LOG_THRESHOLD_US to acquire the
+    // DMX mutex. Helps trace mutex contention back to specific moments — pair
+    // entries with controller activity to find the offender. Written from
+    // _dmxTask (Core 1), read by status JSON builder (AsyncTCP task) — no
+    // mutex; torn reads are visually fine for a debug display.
+    static constexpr uint8_t  MUTEX_LOG_SIZE         = 25;
+    static constexpr uint32_t MUTEX_LOG_THRESHOLD_US = 1000;
+    struct MutexLogEntry { uint32_t timeMs; uint32_t durationUs; };
+    MutexLogEntry _mutexLog[MUTEX_LOG_SIZE] = {};
+    uint8_t       _mutexLogHead  = 0;     // next-write index
+    uint8_t       _mutexLogCount = 0;     // up to MUTEX_LOG_SIZE
 
 private:
     Lumox() = default;

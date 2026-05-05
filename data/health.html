@@ -29,6 +29,13 @@ main{max-width:1100px;margin:0 auto;padding:16px;display:grid;grid-template-colu
 .banner.fail{background:#3a1010;color:#ff8060;border:1px solid #5a2020}
 .bigval{font-family:monospace;font-size:18px;color:#d8d8d8}
 .muted{color:#666;font-size:11px}
+#mlog{max-height:240px;overflow-y:auto;font:11px/1.5 monospace}
+#mlog table{width:100%;border-collapse:collapse}
+#mlog th,#mlog td{text-align:left;padding:3px 6px;border-bottom:1px solid #2e2e2e}
+#mlog th{color:#888;font-weight:600;background:#2a2a2a;position:sticky;top:0}
+#mlog td.us{text-align:right;color:#e0c060}
+#mlog td.us.hi{color:#ff9090}
+#mlog .empty{color:#555;padding:8px;text-align:center;font-style:italic}
 #iface-bar{position:fixed;left:0;right:0;bottom:0;height:26px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;font:11px/1 'Consolas',monospace;letter-spacing:.8px;background:#2a2a2a;color:#888;border-top:1px solid #3a3a3a;z-index:50}
 #iface-bar.eth{background:#1a3a5a;color:#bfdcff;border-top-color:#2a5a8a}
 #iface-bar.sta{background:#1a4020;color:#b0f0c0;border-top-color:#2a6030}
@@ -95,22 +102,28 @@ body{padding-bottom:30px}
       <div class="kv"><span>CPU</span><span id="s-cpu">—</span></div>
     </div>
   </div>
+
+  <div class="card" style="grid-column:1/-1">
+    <h3>Mutex Spike Log <span class="muted">(last 25, ≥1000 µs)</span></h3>
+    <div class="card-body" id="mlog"><div class="empty">No spikes yet.</div></div>
+  </div>
 </main>
 <script>
 function fU(s){var d=s/86400|0,h=s%86400/3600|0,m=s%3600/60|0,sec=s%60;if(d)return d+'d '+h+'h';if(h)return h+'h '+m+'m';if(m)return m+'m '+sec+'s';return sec+'s'}
 function fB(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return n+' B'}
 function fA(ms){if(!ms)return'never';if(ms>=60000)return(ms/60000|0)+'m ago';if(ms>=1000)return(ms/1000).toFixed(1)+'s ago';return ms+' ms ago'}
 function id(x){return document.getElementById(x)}
+function fHz(h){return (h.rateHz||0)+'.'+(h.rateTenths||0)+' Hz'}
 function paint(d){
   var n=d.net||{},a=d.artnet||{},s=d.sys||{},h=d.dmx||{};
   // Banner
   var b=id('banner');
-  if(h.ok){b.className='banner ok';b.textContent='Signal clean — '+(h.rateHz||0)+' Hz, '+(h.frames||0).toLocaleString()+' frames sent'}
+  if(h.ok){b.className='banner ok';b.textContent='Signal clean — '+fHz(h)+', '+(h.frames||0).toLocaleString()+' frames sent'}
   else    {b.className='banner fail';b.textContent='UNCLEAN: '+(h.reason||'unknown')}
   // DMX card
   id('b-dmx').textContent = h.ok?'OK':'FAIL';
   id('b-dmx').className   = 'badge '+(h.ok?'ok':'fail');
-  id('d-rate').textContent= (h.rateHz||0)+' Hz';
+  id('d-rate').textContent= fHz(h);
   id('d-fr').textContent  = (h.frames||0).toLocaleString();
   id('d-se').textContent  = h.sendErr||0;
   id('d-wt').textContent  = h.waitTO||0;
@@ -139,6 +152,15 @@ function paint(d){
   id('s-up').textContent   = fU(s.up||0);
   id('s-heap').textContent = fB(s.heap||0)+' / '+fB(s.heapTotal||0);
   id('s-cpu').textContent  = (s.mhz||0)+' MHz';
+  // Mutex spike log — render newest first
+  var lg=h.mutexLog||[],box=id('mlog');
+  if(!lg.length){box.innerHTML='<div class="empty">No spikes yet.</div>';return}
+  var rows='<table><thead><tr><th>#</th><th>Age</th><th>t (ms)</th><th class="us">µs</th></tr></thead><tbody>';
+  for(var i=lg.length-1;i>=0;i--){
+    var e=lg[i],hi=e.us>=5000?' hi':'';
+    rows+='<tr><td>'+(lg.length-i)+'</td><td>'+fA(e.age)+'</td><td>'+e.t+'</td><td class="us'+hi+'">'+e.us+'</td></tr>';
+  }
+  rows+='</tbody></table>';box.innerHTML=rows;
 }
 var ws;
 function connect(){

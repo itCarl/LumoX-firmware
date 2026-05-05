@@ -100,6 +100,11 @@ bool Lumox::_dispatchArtNet(const uint8_t* buf, int len, IPAddress sender) {
                     }
                     statsArtnetSender = sender;
                 }
+                // Roll the mutex high-water counter every 10000 packets so a
+                // one-time boot spike doesn't pin /health to UNCLEAN forever.
+                if (statsArtnetPackets % 10000 == 0) {
+                    statsDmxMaxMutexUs = 0;
+                }
             }
             return ok;
         }
@@ -386,12 +391,17 @@ bool Lumox::_parseArtNet(const uint8_t* buf, int len, IPAddress sender) {
         _lastSeq = 0;
     }
 
-    // Art-Net sequence check (byte 12). seq=0 disables ordering.
+    // Art-Net sequence check (byte 12). seq=0 disables ordering. Reject only
+    // strictly-older packets (diff < 0) — duplicates (diff == 0) are common
+    // when senders hold a static frame and re-emit with the same seq byte
+    // (e.g. QLC+ EFX Partial, controllers that don't increment on identical
+    // updates). Treating duplicates as stale dropped 80%+ of legitimate
+    // traffic on those senders. int8_t cast handles wraparound.
     const uint8_t seq = buf[12];
     if (seq != 0) {
         if (sender == _lastSeqSender && _lastSeq != 0) {
             const int8_t diff = (int8_t)(seq - _lastSeq);
-            if (diff <= 0) {
+            if (diff < 0) {
                 statsArtnetStale++;
                 return false;
             }
