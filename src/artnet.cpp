@@ -100,11 +100,7 @@ bool Lumox::_dispatchArtNet(const uint8_t* buf, int len, IPAddress sender) {
                     }
                     statsArtnetSender = sender;
                 }
-                // Roll the mutex high-water counter every 10000 packets so a
-                // one-time boot spike doesn't pin /health to UNCLEAN forever.
-                if (statsArtnetPackets % 10000 == 0) {
-                    statsDmxMaxMutexUs = 0;
-                }
+                // (mutex high-water decay is time-based now — see _dmxTask.)
             }
             return ok;
         }
@@ -148,10 +144,10 @@ void Lumox::_handleArtSync() {
     statsInSyncMode    = true;
 
     if (_dmxShadowDirty) {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memcpy(&dmxBuffer[1], &_dmxShadow[1], _dmxShadowLen);
         dmxChannelCount = _dmxShadowLen;
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
         _dmxShadowDirty = false;
     }
 }
@@ -416,10 +412,10 @@ bool Lumox::_parseArtNet(const uint8_t* buf, int len, IPAddress sender) {
         _dmxShadowLen   = dataLen;
         _dmxShadowDirty = true;
     } else {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memcpy(&dmxBuffer[1], &buf[18], dataLen);
         dmxChannelCount = dataLen;
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
     }
 
     return true;
@@ -438,10 +434,10 @@ void Lumox::loopArtNet() {
         LOG_PRINTLN("[ArtNet] ArtSync timeout — reverting to non-sync mode");
         // Flush any pending shadow so we don't hold stale values.
         if (_dmxShadowDirty) {
-            xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+            portENTER_CRITICAL(&_dmxLock);
             memcpy(&dmxBuffer[1], &_dmxShadow[1], _dmxShadowLen);
             dmxChannelCount = _dmxShadowLen;
-            xSemaphoreGive(_dmxMutex);
+            portEXIT_CRITICAL(&_dmxLock);
             _dmxShadowDirty = false;
         }
     }
@@ -503,9 +499,9 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
             break;
 
         case AC_CLEAR_OP0: {
-            xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+            portENTER_CRITICAL(&_dmxLock);
             memset(&dmxBuffer[1], 0, 512);
-            xSemaphoreGive(_dmxMutex);
+            portEXIT_CRITICAL(&_dmxLock);
             LOG_PRINTLN("[ArtNet] ClearOp0 — DMX buffer zeroed");
             break;
         }
@@ -556,9 +552,9 @@ void Lumox::_handleArtCommand(const uint8_t* buf, int len, IPAddress sender) {
                   sender.toString().c_str(), cmd.c_str());
 
     if (cmd.startsWith("clear")) {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memset(&dmxBuffer[1], 0, 512);
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
         sendArtDiagData(sender, 0x40, "DMX cleared");
     }
     else if (cmd.startsWith("reboot") || cmd.startsWith("restart")) {

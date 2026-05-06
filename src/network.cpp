@@ -53,6 +53,10 @@ void Lumox::loadConfig() {
 
     cfgWifiDisableOnEth = p.getBool("wifiOffEth", DEFAULT_WIFI_OFF_ON_ETH);
 
+#if LUMOX_CH1_PIN_NONZERO
+    cfgCh1PinNonzero = p.getBool("ch1Pin", DEFAULT_CH1_PIN_NONZERO);
+#endif
+
     p.end();
 
     LOG_PRINTF("[Config] name=\"%s\"  universe=%u  staSsid=\"%s\"  ethDhcp=%d\n",
@@ -76,6 +80,10 @@ void Lumox::saveConfig() {
     p.putUInt  ("ethSub",   (uint32_t)cfgEthSub);
     p.putUInt  ("ethDns",   (uint32_t)cfgEthDns);
     p.putBool  ("wifiOffEth", cfgWifiDisableOnEth);
+
+#if LUMOX_CH1_PIN_NONZERO
+    p.putBool  ("ch1Pin",   cfgCh1PinNonzero);
+#endif
 
     p.end();
     LOG_PRINTLN("[Config] Saved to NVS.");
@@ -409,9 +417,13 @@ void Lumox::debugEthStatus() {
 // ── Unsolicited ArtPollReply broadcast ────────────────────────────────────
 // Art-Net spec: nodes MAY send unsolicited ArtPollReply on state change so
 // controllers update their node list without an explicit discovery round.
+//
+// Called from the WiFi/ETH event task — *not* the Art-Net RX task that owns
+// _udp. We just flip a flag; the RX task drains it and emits the broadcast
+// from its own context, keeping all UDP TX single-threaded.
 void Lumox::announceArtNetNode() {
-    sendArtPollReply(IPAddress(255, 255, 255, 255));
-    LOG_PRINTF("[ArtNet] Unsolicited ArtPollReply broadcast — reporting IP %s\n",
+    _pendingAnnounce = true;
+    LOG_PRINTF("[ArtNet] Unsolicited ArtPollReply queued — reporting IP %s\n",
                   getIP().toString().c_str());
 }
 

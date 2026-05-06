@@ -137,6 +137,13 @@ public:
     // WiFi is re-enabled automatically.
     bool      cfgWifiDisableOnEth = false;
 
+#if LUMOX_CH1_PIN_NONZERO
+    // Force DMX slot 1 to 0x01 on the wire. See config.h for the rationale —
+    // works around cheap moving-head receivers that resync on the run of
+    // zero bytes formed by start code (0x00) + slot 1 (0x00).
+    bool      cfgCh1PinNonzero = DEFAULT_CH1_PIN_NONZERO;
+#endif
+
     // ── Runtime stats ──────────────────────────────────────────────────────
     uint32_t  statsArtnetPackets = 0;
     uint32_t  statsArtnetLastMs  = 0;       // millis() of the last ArtDMX packet
@@ -181,10 +188,12 @@ public:
     // mutex; torn reads are visually fine for a debug display.
     static constexpr uint8_t  MUTEX_LOG_SIZE         = 25;
     static constexpr uint32_t MUTEX_LOG_THRESHOLD_US = 1000;
+    static constexpr uint32_t MUTEX_DECAY_MS         = 60000;   // 1 min rolling window
     struct MutexLogEntry { uint32_t timeMs; uint32_t durationUs; };
     MutexLogEntry _mutexLog[MUTEX_LOG_SIZE] = {};
     uint8_t       _mutexLogHead  = 0;     // next-write index
     uint8_t       _mutexLogCount = 0;     // up to MUTEX_LOG_SIZE
+    uint32_t      _mutexDecayMs  = 0;     // last time the high-water max was decayed
 
 private:
     Lumox() = default;
@@ -229,10 +238,21 @@ private:
     void _updateLed();
 
     // DMX
+    // _dmxLock is a portMUX spinlock (NOT a FreeRTOS semaphore). Hold time is
+    // bounded — preemption is disabled inside the critical section, so the
+    // mutex holder cannot be paused mid-copy by tcpip_thread (prio 18) or any
+    // other task. Eliminates the priority-inversion spikes that the old
+    // semaphore showed (≥5 ms with WiFi RX bursts).
     dmx_port_t         _dmxPort  = DMX_NUM_1;
-    SemaphoreHandle_t  _dmxMutex = nullptr;
+    portMUX_TYPE       _dmxLock  = portMUX_INITIALIZER_UNLOCKED;
     bool               _dmxReady = false;
     static void        _dmxTask(void* param);
+
+    // Dedicated Art-Net RX task (Core 1, prio 4). Decouples UDP drain from the
+    // Arduino loopTask so HTTP handlers / mDNS / DNS can't delay packet pickup.
+    TaskHandle_t       _artNetTaskH = nullptr;
+    volatile bool      _pendingAnnounce = false;   // set by event task → drained by RX task
+    static void        _artNetTaskWrap(void* param);
 
     // Network
     // _apMode:    AP is the SOLE network path (no ETH, no STA). Used to gate

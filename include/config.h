@@ -84,3 +84,18 @@
 // If no ArtDMX packet is received within this window, the status LED switches
 // to slow pulse. DMX output holds the last value regardless.
 #define DMX_LINK_STALE_MS       2000
+
+// ── DMX slot-1 "pin to non-zero" workaround ───────────────────────────────
+// Some cheap moving-head receivers misdetect the start of frame when slot 1
+// is 0x00 — the start code (also 0x00) followed by a zero slot 1 keeps the
+// line in the same state long enough that a weak break-detector falsely
+// resyncs mid-frame, producing visible jitter on later slots even though
+// those slots are transmitted correctly. Forcing slot 1 to 0x01 breaks the
+// run of zero bytes and lets the receiver lock cleanly. Off by default —
+// only enable on shows where slot 1 is unused (fixtures patched ≥ 2).
+//
+// LUMOX_CH1_PIN_NONZERO (compile-time): 1 = include feature + UI toggle.
+//                                       0 = remove entirely (no NVS, no UI hook).
+// DEFAULT_CH1_PIN_NONZERO (runtime):    initial value of the runtime toggle.
+#define LUMOX_CH1_PIN_NONZERO    1
+#define DEFAULT_CH1_PIN_NONZERO  false

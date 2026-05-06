@@ -15,11 +15,12 @@ static void serveGzip(AsyncWebServerRequest* request,
     request->send(resp);
 }
 
-// Mutex-guarded DMX snapshot — see header comment in Lumox.h.
+// portMUX-guarded DMX snapshot — see header comment in Lumox.h.
+// Called from AsyncTCP task; brief critical section is fine cross-core.
 void Lumox::snapshotDmx(uint8_t* out512) {
-    xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+    portENTER_CRITICAL(&_dmxLock);
     memcpy(out512, &dmxBuffer[1], 512);
-    xSemaphoreGive(_dmxMutex);
+    portEXIT_CRITICAL(&_dmxLock);
 }
 
 // ── WebSocket events (AsyncWebSocket on /ws) ────────────────────────────────
@@ -139,6 +140,10 @@ static void handleConfigBody(Lumox& lx, AsyncWebServerRequest* request,
 
     lx.cfgWifiDisableOnEth = doc["wifiOffEth"] | false;
 
+#if LUMOX_CH1_PIN_NONZERO
+    lx.cfgCh1PinNonzero = doc["ch1Pin"] | false;
+#endif
+
     lx.saveConfig();
 
     request->send(200, "application/json", "{\"ok\":true}");
@@ -202,6 +207,9 @@ void Lumox::_registerRoutes() {
         doc["ethSub"]     = cfgEthSub.toString();
         doc["ethDns"]     = cfgEthDns.toString();
         doc["wifiOffEth"] = cfgWifiDisableOnEth;
+#if LUMOX_CH1_PIN_NONZERO
+        doc["ch1Pin"]     = cfgCh1PinNonzero;
+#endif
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);

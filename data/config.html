@@ -85,6 +85,16 @@ body{padding-bottom:30px}
     <div class="fr"><label>Universe</label><input id="universe" type="number" min="0" max="32767"></div>
   </div>
   <div class="card">
+    <h3>DMX Output</h3>
+    <div class="hint">Workaround for cheap moving-head receivers that jitter when slot 1 is 0x00. Forces channel 1 to value 1 on the wire, so the start code (0x00) is never followed by another zero. Only enable when channel 1 is unused (fixtures patched ≥ 2).</div>
+    <div class="fr"><label>Pin Ch 1 ≥ 1</label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input id="ch1Pin" type="checkbox">
+        <span style="color:#888;font-size:11px">Force DMX channel 1 to value 1 (workaround for receiver jitter)</span>
+      </label>
+    </div>
+  </div>
+  <div class="card">
     <div class="actions">
       <button class="primary" onclick="save()">Save &amp; Reboot</button>
       <button onclick="reboot()">Reboot</button>
@@ -112,6 +122,7 @@ async function load(){
   document.getElementById('ethSub').value = ipOrBlank(c.ethSub);
   document.getElementById('ethDns').value = ipOrBlank(c.ethDns);
   document.getElementById('wifiOffEth').checked = !!c.wifiOffEth;
+  document.getElementById('ch1Pin').checked = !!c.ch1Pin;
   ethMode();
 }
 async function save(){
@@ -127,7 +138,8 @@ async function save(){
     ethGw:document.getElementById('ethGw').value.trim(),
     ethSub:document.getElementById('ethSub').value.trim(),
     ethDns:document.getElementById('ethDns').value.trim(),
-    wifiOffEth:document.getElementById('wifiOffEth').checked};
+    wifiOffEth:document.getElementById('wifiOffEth').checked,
+    ch1Pin:document.getElementById('ch1Pin').checked};
   if(!b.apSsid){msg('AP SSID required.',0);return}
   if(b.apPass.length>0&&b.apPass.length<8){msg('AP password must be empty or 8+ chars.',0);return}
   if(!dhcp && !b.ethIp){msg('Static ETH requires an IP.',0);return}
