@@ -7,7 +7,7 @@
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32-orange?logo=platformio)](https://platformio.org/)
 [![Framework](https://img.shields.io/badge/Framework-Arduino--ESP32-00979D?logo=arduino)](https://github.com/espressif/arduino-esp32)
 [![Art-Net](https://img.shields.io/badge/Art--Net-4-blueviolet)](https://art-net.org.uk/)
-[![Version](https://img.shields.io/badge/version-0.3.0-success)](package.json)
+[![Version](https://img.shields.io/badge/version-0.6.11-success)](package.json)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
 [Overview](#overview) ·
@@ -36,52 +36,71 @@ exact same instant — no visible tearing.
 
 ## Features
 
-- **Dual interface** — WiFi (STA + AP fallback) **and** Wiznet W5500 ethernet in parallel.
-  Wired link is automatically preferred once DHCP/link is up.
+- **Dual interface, single stack** — WiFi (STA + AP fallback) **and** Wiznet W5500 ethernet on a unified lwIP TCP stack. AsyncWebServer + Art-Net UDP reach both interfaces from a single socket. Ethernet is preferred once link + DHCP are up.
+- **AP-aux mode** — when STA is down but ETH is up, the access point still opens so a phone can reach `/config` without unplugging the cable. ETH continues to carry the Art-Net data path.
 - **Art-Net 4** — `OpPoll`, `OpDmx`, `OpSync`, `OpAddress`, `OpCommand`, `OpDiagData`
-- **mDNS discovery** — `_lumox._tcp` service, hostname `lumox-xxyy.local`
+- **mDNS discovery** — `_lumox._tcp` service, hostname `lumox-xxyy.local` (MAC-derived, always unique)
 - **Captive portal** — automatic redirect in AP mode for fast first-time setup
-- **Async web UI** — dashboard, config, health monitor, manual override (all gzipped in PROGMEM)
+- **Async web UI** — dashboard, config, health monitor, manual override (all gzipped in PROGMEM). Interface bar at the bottom of every page indicates which link the browser used: blue = ETHERNET, green = WIFI (STA), orange = WIFI (AP).
 - **OTA updates** — browser upload via [ElegantOTA](https://github.com/ayushsharma82/ElegantOTA) at `/update`
 - **WebSocket live push** — status + DMX slots @ ~5 Hz for live monitoring
-- **Flicker hardening** — sequence check, single-sender lock, sender-swap detection, mutex-guarded buffer
+- **Flicker hardening** — per-sender sequence check, single-sender lock, sender-swap detection, dedicated Art-Net RX FreeRTOS task (decoupled from HTTP / mDNS / DNS), portMUX-guarded DMX buffer (no priority-inversion stalls)
 - **ArtSync mode** — shadow buffer + atomic flip for synchronous multi-node frames
+- **Slot-1 pin workaround** — optional runtime toggle (`/config`) forces DMX channel 1 to value 1 on the wire, dodging cheap moving-head receivers that misdetect the start-code + slot-1 zero run as a fresh BREAK
+- **Silent production builds** — `[env:esp32dev]` compiles all logging out and never opens the UART; `[env:debug]` keeps the full firehose
 
 ---
 
 ## Hardware
 
-### DMX wiring
+### DMX wiring (UART1 → MAX485 → XLR-5)
 
 ```
-┌─────────────┐                ┌──────────┐                ┌──────────┐
-│    ESP32    │                │  MAX485  │                │ XLR 5-pin│
-├─────────────┤                ├──────────┤                ├──────────┤
-│  GPIO 17 TX ├───────────────▶│  DI      │                │          │
-│  GPIO 16 RX │◀───────────────┤  RO      │                │          │
-│  GPIO  4 DE ├──────┬────────▶│  DE      │     A ─────────┤ Pin 3 (+)│
-│             │      └────────▶│  RE      │     B ─────────┤ Pin 2 (−)│
-│       3.3V  ├───────────────▶│  VCC     │    GND ────────┤ Pin 1    │
-│       GND   ├───────────────▶│  GND     │                │          │
-└─────────────┘                └──────────┘                └──────────┘
+┌──────────────┐               ┌────────────┐                  ┌──────────────┐
+│    ESP32     │               │   MAX485   │                  │  XLR 5-pin F │
+├──────────────┤               ├────────────┤                  ├──────────────┤
+│ GPIO 17  TX1 ├──────────────▶│ DI         │                  │ Pin 1  GND   │
+│ GPIO 16  RX1 │◀──────────────┤ RO  (n/c)  │                  │ Pin 2  Data− │
+│ GPIO  4   DE ├───────┬──────▶│ DE         │     A  ──────────┤ Pin 3  Data+ │
+│              │       └──────▶│ RE         │     B  ──────────┤ Pin 4  n/c   │
+│       3.3V   ├──────────────▶│ VCC        │    GND ──────────┤ Pin 5  n/c   │
+│       GND    ├──────────────▶│ GND        │                  │              │
+└──────────────┘               └────────────┘                  └──────────────┘
 ```
 
-> **Tip:** MAX485 also runs on 3.3V VCC, but is more signal-stable at 5V.
-> In that case use a level shifter on DI, or fit a MAX3485 / ISO3088 in the
-> 3.3V variant directly.
+DMX-512 (ANSI E1.11) pin assignment: **1 = signal ground**, **2 = Data−**, **3 = Data+**, **4/5 = optional second link (leave open on a single-link node)**. MAX485 pin **A is non-inverting** → wires to XLR 3, **B is inverting** → wires to XLR 2.
 
-### Ethernet (W5500, optional)
+> **Tips**
+> - Add a 120 Ω termination resistor between A and B at the *last* fixture in the chain.
+> - MAX485 also runs on 3.3 V `VCC`, but the line is more robust at 5 V — feed the chip 5 V and use a level shifter on `DI`, or fit a MAX3485 / ISO3088 in the 3.3 V variant directly. The companion [`lumox-dmx-monitor`](../lumox-dmx-monitor/) sketch on the same hardware (DE held LOW) is the easiest way to verify what's actually on the wire.
 
-| ESP32 GPIO | W5500 |
-|:-:|:-|
-| 5  | CS  |
-| 18 | SCK |
-| 19 | MISO |
-| 23 | MOSI |
-| 34 | INT |
-| 33 | RST |
+### Ethernet wiring (W5500, optional — VSPI / SPI3_HOST)
 
-No W5500 connected? → `Ethernet.begin()` simply fails, firmware continues on WiFi.
+```
+┌──────────────┐               ┌────────────┐
+│    ESP32     │               │   W5500    │
+├──────────────┤               ├────────────┤
+│ GPIO  5   CS ├──────────────▶│ SCS        │
+│ GPIO 18  SCK ├──────────────▶│ SCLK       │
+│ GPIO 19 MISO │◀──────────────┤ MISO       │
+│ GPIO 23 MOSI ├──────────────▶│ MOSI       │
+│ GPIO 34  INT │◀──────────────┤ INT        │ (input-only — see ETH_USE_IRQ)
+│ GPIO 33  RST ├──────────────▶│ RST        │
+│       3.3V   ├──────────────▶│ VCC        │
+│       GND    ├──────────────▶│ GND        │
+└──────────────┘               └────────────┘
+```
+
+| ESP32 GPIO | W5500 | Notes |
+|:-:|:-:|:-|
+| 5  | CS   | SPI chip-select, low-active |
+| 18 | SCK  | SPI clock (20 MHz) |
+| 19 | MISO | SPI master-in |
+| 23 | MOSI | SPI master-out |
+| 34 | INT  | Input-only — needs an external 10 kΩ pull-up if you set `ETH_USE_IRQ=1`; default is polling mode (`ETH_USE_IRQ=0`) which is bulletproof |
+| 33 | RST  | Hardware reset, low-active |
+
+No W5500 connected? → `ETH.begin()` simply fails, firmware continues on WiFi.
 
 ### Customizing pin assignment
 
@@ -172,11 +191,14 @@ Frames are buffered in the shadow; OpSync flips all nodes simultaneously. Result
 DMX output is hardened against typical failure modes:
 
 - **Persistent buffer** — last valid values keep streaming (~44 Hz), regardless of network state
-- **Per-sender sequence check** — out-of-order / duplicate packets are dropped
-- **Single-sender lock** — while primary sender is live (`DMX_LINK_STALE_MS`), other IPs are rejected; primary stale → next sender takes over
+- **Per-sender sequence check** — out-of-order packets dropped (`statsArtnetStale`); duplicates are accepted, since several controllers re-emit static frames with an unchanging sequence byte
+- **Single-sender lock** — while the primary is live (`DMX_LINK_STALE_MS = 2 s`), other IPs are rejected (`statsArtnetLocked`); primary stale → next sender takes over
 - **Sender-swap detection** — controller flips mid-show are counted + visible on `/health`
-- **Mutex-guarded buffer** — no tearing between parser and DMX-TX task
-- **Stale-link LED** — steady on while receiving, slow pulse on timeout
+- **portMUX-guarded DMX buffer** — spinlock instead of FreeRTOS semaphore; preemption disabled inside the critical section eliminates priority-inversion stalls (≥5 ms under WiFi RX bursts)
+- **Dedicated Art-Net RX task** — UDP drain runs on its own FreeRTOS task (Core 1, prio 4), decoupled from HTTP / mDNS / DNS, so web traffic can't delay packet pickup
+- **Slot-1 zero-run workaround** — optional `cfgCh1PinNonzero` forces slot 1 to `0x01` on the wire (see FAQ)
+- **Stale-link LED** — steady on while receiving, slow pulse after 2 s of silence
+- **DMX TX health** — `framesSent`, `sendErr`, `waitTO`, `consecErr`, `rateHz`, `maxMutexUs` + 60 s rolling timeline of mutex-contention spikes on `/health`
 
 → Details in [`CLAUDE.md`](CLAUDE.md#flicker-protection--hardening)
 
@@ -254,7 +276,25 @@ of takeovers is visible on `/health` (`Sender Swaps`).
 <details>
 <summary><strong>Why UART1 instead of UART2?</strong></summary>
 
-`esp_dmx` 4.1 crashes on UART2 with Arduino-ESP32 core 2.x. UART1 is stable.
+`esp_dmx` 4.1 has crashed on UART2 across several arduino-esp32 core versions. UART1 has been stable in every combination tested. The `DMX_UART_PORT` constant in `include/const.h` lets you change it if you need to free GPIO 16/17 — at your own risk.
+</details>
+
+<details>
+<summary><strong>My moving heads jitter when DMX channel 1 = 0. What gives?</strong></summary>
+
+Some cheap moving-head receivers misdetect the start of frame when slot 1 is `0x00`. The DMX start code is also `0x00`, so the line stays low long enough that a weak break-detector falsely resyncs mid-frame — visible as jitter on slots far beyond ch 1, even though those slots are transmitted correctly. Open `/config` → **DMX Output** → tick **Pin Ch 1 ≥ 1**, save & reboot. Slot 1 will then always carry `0x01` on the wire, breaking the run of zero bytes. Only enable when channel 1 is unused (fixtures patched ≥ 2). Compile-time `LUMOX_CH1_PIN_NONZERO=0` removes the feature entirely.
+</details>
+
+<details>
+<summary><strong>How do I check whether DMX is actually on the wire?</strong></summary>
+
+Flash the companion [`lumox-dmx-monitor`](../lumox-dmx-monitor/) sketch onto a spare ESP32 + MAX3485 board (same hardware, DE held LOW = permanent RX). It prints start-code + first 32 channels on the serial monitor at 115200 baud, ~2 ×/s, and reports "no signal" after 2 s of silence. Lumox's `/health` page also surfaces TX-side counters: `framesSent`, `sendErr`, `waitTO`, `consecErr`, `rateHz`, `maxMutexUs`, sender swaps, and a 60 s rolling timeline of mutex-contention spikes.
+</details>
+
+<details>
+<summary><strong>Manual override on `/control` — does it survive a reboot?</strong></summary>
+
+No. Both the master switch (`manualEnabled`) and the per-channel forced values are session-only — Lumox always boots as a clean Art-Net node. The override is intended for live debugging or a quick stage-side rescue, not as a persistent patch.
 </details>
 
 <details>
@@ -265,6 +305,17 @@ npm run build               # gzip → include/html_*.h, writes version.h
 ```
 
 Happens automatically on `pio run` via `pio-scripts/build_ui.py`.
+</details>
+
+<details>
+<summary><strong>Production vs debug build — what's the difference?</strong></summary>
+
+```bash
+pio run -e esp32dev -t upload    # production (default): silent UART, no IDF logs
+pio run -e debug    -t upload    # debug: full boot + periodic dumps, IDF verbose
+```
+
+Production builds compile every `LOG_*` macro to `((void)0)` and never call `Serial.begin()`, so the UART stays closed during shows (no half-formatted strings going to a port nobody's reading). Saves ~50 KB flash too.
 </details>
 
 ---
