@@ -38,11 +38,11 @@ static constexpr uint8_t AC_CLEAR_OP0    = 0xE0;   // zero output universe 0
 static constexpr uint8_t NC_UNIVERSE     = 0x7F;
 
 void Lumox::beginArtNet() {
+    // Single lwIP socket bound to INADDR_ANY:6454 — receives on every netif
+    // (WiFi STA, AP, ETH). No per-interface socket needed.
     _udp.begin(ARTNET_UDP_PORT);
-    Serial.printf("[ArtNet] Listening on WiFi UDP:%d  (Universe %u)\n",
+    LOG_PRINTF("[ArtNet] Listening on UDP:%d  (Universe %u)\n",
                   ARTNET_UDP_PORT, cfgUniverse);
-    // _ethUdp is started from beginEthernet() / loopEthernet() once DHCP is
-    // up — doing it here would open a socket on a not-yet-initialised W5500.
 }
 
 // Returns true whenever a packet was *consumed* from the socket — drain
@@ -53,22 +53,9 @@ void Lumox::beginArtNet() {
 bool Lumox::pollArtNet() {
     int len = _udp.parsePacket();
     if (len <= 0) return false;
-    _lastPacketFromEth = false;
 
     IPAddress sender = _udp.remoteIP();
     int read = _udp.read(_udpBuf, sizeof(_udpBuf));
-    _dispatchArtNet(_udpBuf, read, sender);
-    return true;
-}
-
-bool Lumox::pollArtNetEth() {
-    if (!_ethUp) return false;
-    int len = _ethUdp.parsePacket();
-    if (len <= 0) return false;
-    _lastPacketFromEth = true;
-
-    IPAddress sender = _ethUdp.remoteIP();
-    int read = _ethUdp.read(_udpBuf, sizeof(_udpBuf));
     _dispatchArtNet(_udpBuf, read, sender);
     return true;
 }
@@ -106,13 +93,14 @@ bool Lumox::_dispatchArtNet(const uint8_t* buf, int len, IPAddress sender) {
                     if ((uint32_t)statsArtnetSender != 0) {
                         statsArtnetSenderSwaps++;
                         statsArtnetLastSwapMs = millis();
-                        Serial.printf("[ArtNet] ⚠ sender swap %s → %s (total %u)\n",
+                        LOG_PRINTF("[ArtNet] ⚠ sender swap %s → %s (total %u)\n",
                                       statsArtnetSender.toString().c_str(),
                                       sender.toString().c_str(),
                                       (unsigned)statsArtnetSenderSwaps);
                     }
                     statsArtnetSender = sender;
                 }
+                // (mutex high-water decay is time-based now — see _dmxTask.)
             }
             return ok;
         }
@@ -156,27 +144,62 @@ void Lumox::_handleArtSync() {
     statsInSyncMode    = true;
 
     if (_dmxShadowDirty) {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memcpy(&dmxBuffer[1], &_dmxShadow[1], _dmxShadowLen);
         dmxChannelCount = _dmxShadowLen;
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
         _dmxShadowDirty = false;
     }
 }
 
-// ── UDP send helper — picks WiFi or Ethernet socket based on context ──────
-// If the last received packet came via ETH, reply goes out on ETH. For
-// unsolicited / broadcast sends (forceEth=false, nothing received yet) we
-// prefer ETH when up, else WiFi — matches getIP() preference.
+// ── UDP send helper ────────────────────────────────────────────────────────
+// Single lwIP socket — route table picks the right netif based on dest IP.
+// Unicast replies to the controller's IP egress on whichever interface that
+// IP is reachable through (no per-packet bookkeeping needed).
 void Lumox::_sendArtNetUdp(IPAddress target, uint16_t port,
-                           const uint8_t* buf, size_t len, bool forceEth) {
-    const bool useEth = _ethUp && (forceEth || _lastPacketFromEth);
-    if (useEth) {
-        _ethUdp.beginPacket(target, port);
-        _ethUdp.write(buf, len);
-        _ethUdp.endPacket();
-    } else {
-        _udp.beginPacket(target, port);
+                           const uint8_t* buf, size_t len) {
+    _udp.beginPacket(target, port);
+    _udp.write(buf, len);
+    _udp.endPacket();
+}
+
+// Broadcast helper for unsolicited ArtPollReply. lwIP routes 255.255.255.255
+// out the default netif only — to ensure both WiFi and ETH controllers see
+// our announce, send to each interface's directed broadcast address.
+void Lumox::_broadcastArtPollReply(const uint8_t* buf, size_t len) {
+    auto bcastFor = [](IPAddress ip, IPAddress mask) -> IPAddress {
+        return IPAddress(ip[0] | (uint8_t)~mask[0],
+                         ip[1] | (uint8_t)~mask[1],
+                         ip[2] | (uint8_t)~mask[2],
+                         ip[3] | (uint8_t)~mask[3]);
+    };
+    bool sent = false;
+    if (_ethUp) {
+        IPAddress b = bcastFor(ETH.localIP(), ETH.subnetMask());
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (!_apMode && WiFi.status() == WL_CONNECTED) {
+        IPAddress b = bcastFor(WiFi.localIP(), WiFi.subnetMask());
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (_apActive) {
+        // AP serving (fallback or aux to ETH). Send to AP subnet broadcast so
+        // any controller on the AP side (phone, laptop) sees the announce.
+        IPAddress b = bcastFor(WiFi.softAPIP(), IPAddress(255, 255, 255, 0));
+        _udp.beginPacket(b, ARTNET_UDP_PORT);
+        _udp.write(buf, len);
+        _udp.endPacket();
+        sent = true;
+    }
+    if (!sent) {
+        // No netif up yet — limited broadcast as a last resort.
+        _udp.beginPacket(IPAddress(255, 255, 255, 255), ARTNET_UDP_PORT);
         _udp.write(buf, len);
         _udp.endPacket();
     }
@@ -278,12 +301,8 @@ void Lumox::sendArtPollReply(IPAddress target) {
     // 200 : Style — StNode (0x00)
     reply[200] = 0x00;
 
-    // 201-206 : MAC
-    {
-        uint8_t mac[6];
-        WiFi.macAddress(mac);
-        memcpy(&reply[201], mac, 6);
-    }
+    // 201-206 : MAC (cached once at boot — see Lumox::begin)
+    memcpy(&reply[201], _macCached, 6);
 
     // 207-210 : BindIp (same as node IP for single-bind devices)
     reply[207] = ip[0]; reply[208] = ip[1]; reply[209] = ip[2]; reply[210] = ip[3];
@@ -299,15 +318,12 @@ void Lumox::sendArtPollReply(IPAddress target) {
     //   bit 6 : 15-bit port addressing
     reply[212] = _apMode ? 0x4D : 0x4F;
 
-    // Broadcasts to 255.255.255.255 = unsolicited announce — send via ETH too
-    // if up, so wired controllers discover us even on first boot.
-    const bool isBroadcast = (target == IPAddress(255, 255, 255, 255));
-    _sendArtNetUdp(target, ARTNET_UDP_PORT, reply, 239, /*forceEth=*/isBroadcast);
-    if (isBroadcast && _ethUp && !_lastPacketFromEth) {
-        // Also send via WiFi socket so WiFi-side controllers see the broadcast.
-        _udp.beginPacket(target, ARTNET_UDP_PORT);
-        _udp.write(reply, 239);
-        _udp.endPacket();
+    // Limited broadcast = unsolicited announce → send to every netif's
+    // directed broadcast so both WiFi and ETH controllers see it.
+    if (target == IPAddress(255, 255, 255, 255)) {
+        _broadcastArtPollReply(reply, 239);
+    } else {
+        _sendArtNetUdp(target, ARTNET_UDP_PORT, reply, 239);
     }
 }
 
@@ -371,12 +387,17 @@ bool Lumox::_parseArtNet(const uint8_t* buf, int len, IPAddress sender) {
         _lastSeq = 0;
     }
 
-    // Art-Net sequence check (byte 12). seq=0 disables ordering.
+    // Art-Net sequence check (byte 12). seq=0 disables ordering. Reject only
+    // strictly-older packets (diff < 0) — duplicates (diff == 0) are common
+    // when senders hold a static frame and re-emit with the same seq byte
+    // (e.g. QLC+ EFX Partial, controllers that don't increment on identical
+    // updates). Treating duplicates as stale dropped 80%+ of legitimate
+    // traffic on those senders. int8_t cast handles wraparound.
     const uint8_t seq = buf[12];
     if (seq != 0) {
         if (sender == _lastSeqSender && _lastSeq != 0) {
             const int8_t diff = (int8_t)(seq - _lastSeq);
-            if (diff <= 0) {
+            if (diff < 0) {
                 statsArtnetStale++;
                 return false;
             }
@@ -391,10 +412,10 @@ bool Lumox::_parseArtNet(const uint8_t* buf, int len, IPAddress sender) {
         _dmxShadowLen   = dataLen;
         _dmxShadowDirty = true;
     } else {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memcpy(&dmxBuffer[1], &buf[18], dataLen);
         dmxChannelCount = dataLen;
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
     }
 
     return true;
@@ -410,13 +431,13 @@ void Lumox::loopArtNet() {
 
     if (statsInSyncMode && (now - statsArtSyncLastMs) > ART_SYNC_TIMEOUT_MS) {
         statsInSyncMode = false;
-        Serial.println("[ArtNet] ArtSync timeout — reverting to non-sync mode");
+        LOG_PRINTLN("[ArtNet] ArtSync timeout — reverting to non-sync mode");
         // Flush any pending shadow so we don't hold stale values.
         if (_dmxShadowDirty) {
-            xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+            portENTER_CRITICAL(&_dmxLock);
             memcpy(&dmxBuffer[1], &_dmxShadow[1], _dmxShadowLen);
             dmxChannelCount = _dmxShadowLen;
-            xSemaphoreGive(_dmxMutex);
+            portEXIT_CRITICAL(&_dmxLock);
             _dmxShadowDirty = false;
         }
     }
@@ -469,7 +490,7 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
     switch (cmd) {
         case AC_LED_LOCATE:
             _identifyUntilMs = millis() + 10000;     // 10 s identify
-            Serial.println("[ArtNet] Identify (LED locate) 10 s");
+            LOG_PRINTLN("[ArtNet] Identify (LED locate) 10 s");
             break;
 
         case AC_LED_NORMAL:
@@ -478,10 +499,10 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
             break;
 
         case AC_CLEAR_OP0: {
-            xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+            portENTER_CRITICAL(&_dmxLock);
             memset(&dmxBuffer[1], 0, 512);
-            xSemaphoreGive(_dmxMutex);
-            Serial.println("[ArtNet] ClearOp0 — DMX buffer zeroed");
+            portEXIT_CRITICAL(&_dmxLock);
+            LOG_PRINTLN("[ArtNet] ClearOp0 — DMX buffer zeroed");
             break;
         }
 
@@ -498,7 +519,7 @@ void Lumox::_handleArtAddress(const uint8_t* buf, int len, IPAddress sender) {
 
     if (changed) {
         saveConfig();
-        Serial.printf("[ArtNet] OpAddress from %s: uni=%u name=\"%s\"\n",
+        LOG_PRINTF("[ArtNet] OpAddress from %s: uni=%u name=\"%s\"\n",
                       sender.toString().c_str(), cfgUniverse, cfgDeviceName.c_str());
     }
 
@@ -527,13 +548,13 @@ void Lumox::_handleArtCommand(const uint8_t* buf, int len, IPAddress sender) {
     cmd.toLowerCase();
     cmd.trim();
 
-    Serial.printf("[ArtNet] OpCommand from %s: \"%s\"\n",
+    LOG_PRINTF("[ArtNet] OpCommand from %s: \"%s\"\n",
                   sender.toString().c_str(), cmd.c_str());
 
     if (cmd.startsWith("clear")) {
-        xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+        portENTER_CRITICAL(&_dmxLock);
         memset(&dmxBuffer[1], 0, 512);
-        xSemaphoreGive(_dmxMutex);
+        portEXIT_CRITICAL(&_dmxLock);
         sendArtDiagData(sender, 0x40, "DMX cleared");
     }
     else if (cmd.startsWith("reboot") || cmd.startsWith("restart")) {

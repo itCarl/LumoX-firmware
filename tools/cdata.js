@@ -1,5 +1,4 @@
 // Converts HTML files in data/ to gzipped C byte arrays in include/html_*.h
-// Follows the WLED / DartLaser pattern.
 // Also generates include/version.h from package.json `version` and substitutes
 // {{VERSION}} / {{BUILD_DATE}} placeholders in HTML before gzipping so the
 // running firmware and the served pages report the same version string.

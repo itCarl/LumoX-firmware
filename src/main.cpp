@@ -3,7 +3,7 @@
 #include "config.h"
 
 void setup() {
-    Serial.begin(SERIAL_BAUD);
+    LOG_BEGIN(SERIAL_BAUD);
     Lumox::instance().begin();
 }
 

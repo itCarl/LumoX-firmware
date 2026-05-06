@@ -32,10 +32,17 @@
 // reachable on WiFi while ETH carries the show traffic.
 #define DEFAULT_WIFI_OFF_ON_ETH false
 
+// W5500 INT pin connected with pullup? Compile-time switch — must match
+// hardware wiring. 0 = polling mode (irq=-1), bulletproof. 1 = use ETH_INT_PIN
+// for IRQ-driven link events. Default 0 because GPIO34 is input-only with no
+// internal pullup; a floating INT line blocks link-state events. Set to 1
+// only if you've wired an external pullup on ETH_INT_PIN, or moved INT to a
+// GPIO with a built-in pullup.
+#define ETH_USE_IRQ             0
+
 // ── Fixed settings (not editable via the web UI) ───────────────────────────
 #define ARTNET_UDP_PORT         6454
 #define WEB_SERVER_PORT         80
-#define WS_PORT                 81
 #define SERIAL_BAUD             115200
 
 // ── Firmware version (reported in ArtPollReply) ───────────────────────────
@@ -77,3 +84,18 @@
 // If no ArtDMX packet is received within this window, the status LED switches
 // to slow pulse. DMX output holds the last value regardless.
 #define DMX_LINK_STALE_MS       2000
+
+// ── DMX slot-1 "pin to non-zero" workaround ───────────────────────────────
+// Some cheap moving-head receivers misdetect the start of frame when slot 1
+// is 0x00 — the start code (also 0x00) followed by a zero slot 1 keeps the
+// line in the same state long enough that a weak break-detector falsely
+// resyncs mid-frame, producing visible jitter on later slots even though
+// those slots are transmitted correctly. Forcing slot 1 to 0x01 breaks the
+// run of zero bytes and lets the receiver lock cleanly. Off by default —
+// only enable on shows where slot 1 is unused (fixtures patched ≥ 2).
+//
+// LUMOX_CH1_PIN_NONZERO (compile-time): 1 = include feature + UI toggle.
+//                                       0 = remove entirely (no NVS, no UI hook).
+// DEFAULT_CH1_PIN_NONZERO (runtime):    initial value of the runtime toggle.
+#define LUMOX_CH1_PIN_NONZERO    1
+#define DEFAULT_CH1_PIN_NONZERO  false

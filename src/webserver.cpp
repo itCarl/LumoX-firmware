@@ -15,34 +15,37 @@ static void serveGzip(AsyncWebServerRequest* request,
     request->send(resp);
 }
 
-// Mutex-guarded DMX snapshot — see header comment in Lumox.h.
+// portMUX-guarded DMX snapshot — see header comment in Lumox.h.
+// Called from AsyncTCP task; brief critical section is fine cross-core.
 void Lumox::snapshotDmx(uint8_t* out512) {
-    xSemaphoreTake(_dmxMutex, portMAX_DELAY);
+    portENTER_CRITICAL(&_dmxLock);
     memcpy(out512, &dmxBuffer[1], 512);
-    xSemaphoreGive(_dmxMutex);
+    portEXIT_CRITICAL(&_dmxLock);
 }
 
-// ── WebSocket events (static trampoline → instance) ─────────────────────────
-// Still using links2004/WebSockets on port 81 — push frequency is 5 Hz and
-// the loop tick is cheap, so an async migration here isn't worth the API churn.
+// ── WebSocket events (AsyncWebSocket on /ws) ────────────────────────────────
+// Mounted on the same AsyncWebServer as HTTP — port 80, path /ws.
+// Runs on AsyncTCP's task, no loop tick for IO. cleanupClients() is called
+// from loopWebServer() to drop dead sockets.
 
-void Lumox::_onWsEvent(uint8_t num, WStype_t type, uint8_t* /*payload*/, size_t /*length*/) {
-    auto& lx = Lumox::instance();
+void Lumox::_onWsEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClient* client,
+                       AwsEventType type, void* /*arg*/, uint8_t* /*data*/, size_t /*len*/) {
     switch (type) {
-        case WStype_CONNECTED:
-            Serial.printf("[WS] Client #%u connected\n", num);
+        case WS_EVT_CONNECT:
+            LOG_PRINTF("[WS] Client #%u connected (%s)\n",
+                          client->id(), client->remoteIP().toString().c_str());
             // Send current state immediately so the dashboard doesn't blink
             // empty until the next 5 Hz broadcast.
             {
-                String json = lx.buildStatusJson();
-                lx._ws.sendTXT(num, json);
+                String json = buildStatusJson();
+                client->text(json);
                 uint8_t snap[512];
-                lx.snapshotDmx(snap);
-                lx._ws.sendBIN(num, snap, sizeof(snap));
+                snapshotDmx(snap);
+                client->binary(snap, sizeof(snap));
             }
             break;
-        case WStype_DISCONNECTED:
-            Serial.printf("[WS] Client #%u disconnected\n", num);
+        case WS_EVT_DISCONNECT:
+            LOG_PRINTF("[WS] Client #%u disconnected\n", client->id());
             break;
         default:
             break;
@@ -137,11 +140,15 @@ static void handleConfigBody(Lumox& lx, AsyncWebServerRequest* request,
 
     lx.cfgWifiDisableOnEth = doc["wifiOffEth"] | false;
 
+#if LUMOX_CH1_PIN_NONZERO
+    lx.cfgCh1PinNonzero = doc["ch1Pin"] | false;
+#endif
+
     lx.saveConfig();
 
     request->send(200, "application/json", "{\"ok\":true}");
 
-    Serial.println("[Config] Saved — rebooting in 1 s...");
+    LOG_PRINTLN("[Config] Saved — rebooting in 1 s...");
     // Reboot from a deferred task — restarting from inside the request lambda
     // would cut the response before the client receives it.
     xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(1000)); ESP.restart(); },
@@ -200,6 +207,9 @@ void Lumox::_registerRoutes() {
         doc["ethSub"]     = cfgEthSub.toString();
         doc["ethDns"]     = cfgEthDns.toString();
         doc["wifiOffEth"] = cfgWifiDisableOnEth;
+#if LUMOX_CH1_PIN_NONZERO
+        doc["ch1Pin"]     = cfgCh1PinNonzero;
+#endif
         String out;
         serializeJson(doc, out);
         req->send(200, "application/json", out);
@@ -273,7 +283,7 @@ void Lumox::_registerRoutes() {
 
     _http.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* req) {
         req->send(200, "application/json", "{\"ok\":true}");
-        Serial.println("[System] Reboot requested.");
+        LOG_PRINTLN("[System] Reboot requested.");
         xTaskCreate([](void*){ vTaskDelay(pdMS_TO_TICKS(500)); ESP.restart(); },
                     "rebootDelay", 2048, nullptr, 1, nullptr);
     });
@@ -289,11 +299,12 @@ void Lumox::_registerRoutes() {
     // ── Captive-portal probe endpoints ─────────────────────────────────────
     // Each OS pings its own URL on WiFi connect. A response other than the
     // expected "success" makes the OS show a "Sign in to network" notification.
-    // Only act captively in AP fallback mode — in STA mode the ESP32 is on a
-    // normal network and must not hijack these probes.
+    // Captive fires whenever softAP is up (_apActive) — including AP-aux mode
+    // (ETH up + STA down + AP serving). Redirect uses softAPIP() explicitly so
+    // AP clients don't get pointed at the ETH address they can't reach.
     auto captive = [this](AsyncWebServerRequest* req) {
-        if (_apMode) sendCaptiveRedirect(req, getIP().toString());
-        else         req->send(204);
+        if (_apActive) sendCaptiveRedirect(req, WiFi.softAPIP().toString());
+        else           req->send(204);
     };
 
     // Android (Google Play Services + stock)
@@ -310,7 +321,10 @@ void Lumox::_registerRoutes() {
 
     // RFC 8908 — structured captive-portal API
     _http.on("/.well-known/captive-portal", HTTP_GET, [this](AsyncWebServerRequest* req) {
-        String portal = String("http://") + getIP().toString() + "/config";
+        // Use softAPIP for AP clients (incl. AP-aux mode) — they can't reach
+        // ETH/STA addresses. Otherwise advertise the primary IP.
+        const String host = _apActive ? WiFi.softAPIP().toString() : getIP().toString();
+        String portal = String("http://") + host + "/config";
         String body = String("{\"captive\":true,\"user-portal-url\":\"") + portal + "\"}";
         AsyncWebServerResponse* resp = req->beginResponse(200, "application/captive+json", body);
         resp->addHeader("Cache-Control", "private");
@@ -318,8 +332,8 @@ void Lumox::_registerRoutes() {
     });
 
     _http.onNotFound([this](AsyncWebServerRequest* req) {
-        if (_apMode) sendCaptiveRedirect(req, getIP().toString());
-        else         req->send(404, "text/plain", "Not found");
+        if (_apActive) sendCaptiveRedirect(req, WiFi.softAPIP().toString());
+        else           req->send(404, "text/plain", "Not found");
     });
 }
 
@@ -328,24 +342,28 @@ void Lumox::_registerRoutes() {
 void Lumox::beginWebServer() {
     _registerRoutes();
 
+    // AsyncWebSocket mounted at /ws on the same HTTP server (port 80).
+    _ws.onEvent([this](AsyncWebSocket* s, AsyncWebSocketClient* c,
+                       AwsEventType t, void* a, uint8_t* d, size_t l) {
+        _onWsEvent(s, c, t, a, d, l);
+    });
+    _http.addHandler(&_ws);
+
     // ElegantOTA in async mode (ELEGANTOTA_USE_ASYNC_WEBSERVER=1) — mounts /update.
     ElegantOTA.begin(&_http);
 
     _http.begin();
-    Serial.printf("[Web] HTTP (async) on port %d\n", WEB_SERVER_PORT);
-
-    _ws.begin();
-    _ws.onEvent(_onWsEvent);
-    Serial.printf("[WS]  WebSocket on port %d\n", WS_PORT);
+    LOG_PRINTF("[Web] HTTP (async) on port %d, WS on /ws\n", WEB_SERVER_PORT);
 }
 
 void Lumox::loopWebServer() {
-    // AsyncWebServer needs no loop tick — it runs on AsyncTCP's own task.
-    // WebSocket + DNS + OTA still need pumping from here.
-    _ws.loop();
+    // AsyncWebServer + AsyncWebSocket need no loop tick for IO — they run on
+    // AsyncTCP's task. cleanupClients() drops disconnected sockets so the
+    // tracking list doesn't grow unbounded.
+    _ws.cleanupClients();
     ElegantOTA.loop();
 
-    if (_apMode) {
+    if (_apActive) {
         _dns.processNextRequest();
     }
 }
@@ -361,10 +379,16 @@ String Lumox::buildStatusJson() {
     const char* mode = _apMode ? "AP" : (_ethUp ? "ETH" : "STA");
     net["mode"]    = mode;
     net["fb"]      = _apFallback;
+    net["ap"]      = _apActive;       // AP-aux flag (true even when ETH primary)
+    net["apIp"]    = _apActive ? WiFi.softAPIP().toString() : String("");
     net["ssid"]    = _apMode ? cfgApSsid : cfgStaSsid;
     net["ip"]      = getIP().toString();
     net["rssi"]    = getRssi();
     net["clients"] = getClients();
+    // Network hostname — MAC-derived, used for mDNS + DHCP. Decoupled from
+    // the user-friendly cfgDeviceName so multiple boards can share a label.
+    net["host"]    = networkHostname();
+    net["name"]    = cfgDeviceName;
 
     // STA sub-state (so dashboard can show both interfaces side-by-side)
     auto sta = net["sta"].to<JsonObject>();
@@ -373,11 +397,8 @@ String Lumox::buildStatusJson() {
     sta["ip"]   = staOn ? WiFi.localIP().toString() : String("");
     sta["rssi"] = staOn ? WiFi.RSSI()               : 0;
 
-    // Ethernet sub-state. All fields read cached values — never call into the
-    // arduino-libraries/Ethernet API here. AsyncWebServer dispatches /api/status
-    // on its own task; a direct W5500 SPI read from this context would race
-    // the main loop's parsePacket() / Ethernet.maintain() and corrupt SPI →
-    // bogus link-down readings flipping _ethUp false.
+    // Ethernet sub-state. State updated from ETH events (_onEthEvent), so
+    // these fields are always coherent with the active interface.
     auto eth = net["eth"].to<JsonObject>();
     eth["hw"]    = _ethHw;
     eth["up"]    = _ethUp;
@@ -417,7 +438,24 @@ String Lumox::buildStatusJson() {
     dmx["consecErr"]  = statsDmxConsecErrors;
     dmx["maxConsec"]  = statsDmxMaxConsecErr;
     dmx["rateHz"]     = statsDmxRateHz;
+    dmx["rateTenths"] = statsDmxRateTenths;
     dmx["maxMutexUs"] = statsDmxMaxMutexUs;
+
+    // Mutex-spike timeline (oldest → newest). Snapshot indices once so a
+    // concurrent _dmxTask write doesn't shift entries mid-emit.
+    auto mlog = dmx["mutexLog"].to<JsonArray>();
+    const uint8_t cnt   = _mutexLogCount;
+    const uint8_t head  = _mutexLogHead;
+    const uint8_t start = (head + MUTEX_LOG_SIZE - cnt) % MUTEX_LOG_SIZE;
+    const uint32_t now  = millis();
+    for (uint8_t i = 0; i < cnt; i++) {
+        const uint8_t idx = (start + i) % MUTEX_LOG_SIZE;
+        const auto& e = _mutexLog[idx];
+        auto o = mlog.add<JsonObject>();
+        o["t"]   = e.timeMs;
+        o["age"] = (now >= e.timeMs) ? (now - e.timeMs) : 0;
+        o["us"]  = e.durationUs;
+    }
 
     // System
     auto sys = doc["sys"].to<JsonObject>();
@@ -439,11 +477,11 @@ String Lumox::buildStatusJson() {
 
 void Lumox::pushStateToClients() {
     String json = buildStatusJson();
-    _ws.broadcastTXT(json);
+    _ws.textAll(json);
 
     // Snapshot under mutex — concurrent Art-Net writes would otherwise
     // produce torn frames in the dashboard.
     uint8_t snap[512];
     snapshotDmx(snap);
-    _ws.broadcastBIN(snap, sizeof(snap));
+    _ws.binaryAll(snap, sizeof(snap));
 }

@@ -1,5 +1,31 @@
 #pragma once
 
+// ── Serial-log toggle ──────────────────────────────────────────────────────
+// `[env:debug]` (platformio.ini) sets LUMOX_DEBUG=1 → all log macros expand
+// to Serial.* and `Serial.begin()` runs. Production `[env:esp32dev]` sets
+// LUMOX_DEBUG=0 → every log macro compiles to ((void)0) and the UART driver
+// is never started, so the serial port is genuinely silent during shows
+// (no half-formatted strings going to a closed port).
+//
+// All firmware logging — boot init, lifecycle events, error paths, periodic
+// dumps — goes through the LOG_* macros. There are no raw Serial.* calls in
+// the codebase (any newly added one will compile in prod and break silence).
+#ifndef LUMOX_DEBUG
+#define LUMOX_DEBUG 0
+#endif
+
+#if LUMOX_DEBUG
+  #define LOG_BEGIN(b)       Serial.begin(b)
+  #define LOG_PRINT(x)       Serial.print(x)
+  #define LOG_PRINTLN(...)   Serial.println(__VA_ARGS__)
+  #define LOG_PRINTF(...)    Serial.printf(__VA_ARGS__)
+#else
+  #define LOG_BEGIN(b)       ((void)0)
+  #define LOG_PRINT(x)       ((void)0)
+  #define LOG_PRINTLN(...)   ((void)0)
+  #define LOG_PRINTF(...)    ((void)0)
+#endif
+
 // ── DMX UART & MAX485 ──────────────────────────────────────────────────────
 // Wiring:
 //   TX_PIN  → MAX485 DI  (Data In)
