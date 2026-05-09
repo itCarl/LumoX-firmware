@@ -70,16 +70,20 @@ body{padding-bottom:30px}
   </div>
 
   <div class="card">
-    <h3>Art-Net Link <span id="b-an" class="badge ok">—</span></h3>
+    <h3>Input Link <span id="b-an" class="badge ok">—</span></h3>
     <div class="card-body">
+      <div class="kv"><span>Protocol</span><span id="a-proto">—</span></div>
       <div class="kv"><span>Packets received</span><span id="a-pkts">—</span></div>
       <div class="kv"><span>Last packet</span><span id="a-age">—</span></div>
       <div class="kv"><span>Sender</span><span id="a-from">—</span></div>
       <div class="kv"><span>Stale (out-of-order)</span><span id="a-stale">—</span></div>
       <div class="kv"><span>Locked (other sender)</span><span id="a-lock">—</span></div>
       <div class="kv"><span>Sender swaps</span><span id="a-sw">—</span></div>
-      <div class="kv"><span>ProtVer rejects</span><span id="a-bp">—</span></div>
-      <div class="kv"><span>ArtSync</span><span id="a-sy">—</span></div>
+      <div class="kv" id="r-bp" style="display:none"><span>ProtVer rejects</span><span id="a-bp">—</span></div>
+      <div class="kv" id="r-sy" style="display:none"><span>ArtSync</span><span id="a-sy">—</span></div>
+      <div class="kv" id="r-prio" style="display:none"><span>E1.31 priority</span><span id="a-prio">—</span></div>
+      <div class="kv" id="r-mc" style="display:none"><span>E1.31 multicast</span><span id="a-mc">—</span></div>
+      <div class="kv" id="r-lp" style="display:none"><span>Lower-prio drops</span><span id="a-lp">—</span></div>
     </div>
   </div>
 
@@ -129,18 +133,26 @@ function paint(d){
   id('d-wt').textContent  = h.waitTO||0;
   id('d-ce').textContent  = (h.consecErr||0)+' / '+(h.maxConsec||0);
   id('d-mu').textContent  = (h.maxMutexUs||0)+' µs';
-  // Art-Net card — green if recent traffic, warn if stale
+  // Source card — green if recent traffic, warn if stale. Some fields are
+  // protocol-specific; sources extend the same "artnet" block via httpStatus().
   var rxOk = a.pkts>0 && a.age<2000;
   id('b-an').textContent = rxOk?'RX':'IDLE';
   id('b-an').className   = 'badge '+(rxOk?'ok':'warn');
+  id('a-proto').textContent= (d.proto||'artnet').toUpperCase();
   id('a-pkts').textContent = (a.pkts||0).toLocaleString();
   id('a-age').textContent  = fA(a.age||0);
   id('a-from').textContent = a.sender||'—';
   id('a-stale').textContent= a.stale||0;
   id('a-lock').textContent = a.locked||0;
   id('a-sw').textContent   = a.swaps||0;
-  id('a-bp').textContent   = a.badProto||0;
-  id('a-sy').textContent   = (a.syncs||0)+(a.inSync?' (active)':'');
+  // Protocol-specific extras — show only when populated.
+  function show(rid,on){var e=id(rid);if(e)e.style.display=on?'':'none'}
+  var isAn = d.proto==='artnet';
+  show('r-bp',isAn); show('r-sy',isAn);
+  if(isAn){id('a-bp').textContent=a.badProto||0;id('a-sy').textContent=(a.syncs||0)+(a.inSync?' (active)':'')}
+  var isE = d.proto==='e131';
+  show('r-prio',isE); show('r-mc',isE); show('r-lp',isE);
+  if(isE){id('a-prio').textContent=(a.priority||0)+' · min '+(a.minPrio||0);id('a-mc').textContent=a.multicast?'joined':'unicast only';id('a-lp').textContent=a.lowerPrio||0}
   // Network
   id('n-mode').textContent = n.mode||'—';
   id('n-ip').textContent   = n.ip||'—';
@@ -188,6 +200,9 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
   else if(host===mdns){var m=(n.mode||'').toLowerCase();if(m==='eth')tag('eth','ETHERNET (mDNS)');else if(m==='sta')tag('sta','WIFI (STA, mDNS)');else if(m==='ap')tag('ap','WIFI (AP, mDNS)')}
   document.getElementById('iface-bar').className=cls;
   document.getElementById('iface-label').textContent=label;
+  var dn=n.name||'',bar=document.getElementById('devname-bar');
+  if(bar)bar.textContent=dn;
+  if(dn)document.title=dn+' · Lumox · Health';
 }).catch(()=>{});
 </script>
 </body></html>

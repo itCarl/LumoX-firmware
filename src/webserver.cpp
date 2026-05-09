@@ -108,12 +108,82 @@ static void handleConfigBody(Lumox& lx, AsyncWebServerRequest* request,
         return;
     }
 
+    // Validate protocol selection (string → enum). Reject unknown values
+    // so a typo doesn't silently brick ingest until next factory-reset.
+    String protoStr = doc["protocol"] | "artnet";
+    ProtocolType protoEnum = ProtocolType::ArtNet;
+    if (!protocolTypeFromString(protoStr.c_str(), protoEnum)) {
+        request->send(400, "text/plain",
+                      String("Unknown protocol: ") + protoStr);
+        return;
+    }
+
+    uint16_t newUni = doc["universe"] | 0;
+
+    // Lumox is built for shows of up to LUMOX_MAX_UNIVERSE distinct universes.
+    // Art-Net uses 0..MAX-1, E1.31 uses 1..MAX (universe 0 reserved by spec).
+    // Clamp + auto-bump on save so the UI value is always coherent with the
+    // active protocol's allowed range.
+    if (newUni > LUMOX_MAX_UNIVERSE) {
+        LOG_PRINTF("[Config] Universe %u above max %u — clamped\n",
+                      newUni, LUMOX_MAX_UNIVERSE);
+        newUni = LUMOX_MAX_UNIVERSE;
+    }
+    if (protoEnum == ProtocolType::E131 && newUni == 0) {
+        LOG_PRINTLN("[Config] E1.31 selected with universe 0 — auto-bumping to 1 (spec minimum)");
+        newUni = 1;
+    }
+    if (protoEnum == ProtocolType::ArtNet && newUni > LUMOX_MAX_UNIVERSE - 1) {
+        // Art-Net is 0-based — same total count means cap one lower.
+        newUni = LUMOX_MAX_UNIVERSE - 1;
+    }
+
+    // Symmetric default-step on protocol switch: if the user came from E1.31
+    // (where 1 is the spec default) and chose Art-Net (where 0 is the
+    // convention), step 1 → 0 so the universe matches the new protocol's
+    // expected default. Only fires on actual protocol change, so a user who
+    // picked Art-Net universe 1 deliberately keeps that value across saves.
+    if (lx.cfgProtocol == ProtocolType::E131 &&
+        protoEnum     == ProtocolType::ArtNet &&
+        newUni == 1) {
+        LOG_PRINTLN("[Config] E1.31 → Art-Net with universe 1 — auto-stepping to 0 (Art-Net default)");
+        newUni = 0;
+    }
+
     // Apply
     lx.cfgApSsid      = apSsid;
     lx.cfgApPassword  = apPass;
     lx.cfgStaSsid     = doc["staSsid"]  | "";
     lx.cfgStaPassword = doc["staPass"]  | "";
-    lx.cfgUniverse    = doc["universe"] | 0;
+    lx.cfgUniverse    = newUni;
+    lx.cfgProtocol    = protoEnum;
+
+    // Optional friendly device name — shown in tab title, navbar, mDNS TXT,
+    // ArtPollReply ShortName. Falls through unchanged if the field is absent.
+    if (doc["devName"].is<const char*>()) {
+        String dn = doc["devName"].as<const char*>();
+        dn.trim();
+        if (dn.length() > 0 && dn.length() <= 32) {
+            lx.cfgDeviceName = dn;
+        }
+    }
+
+    // Source-side toggles (multicast / sequence-skip / E1.31 min-priority /
+    // hold-timeout). All have safe defaults; missing fields → keep current.
+    lx.cfgE131Multicast   = doc["e131Mc"]   | lx.cfgE131Multicast;
+    lx.cfgSkipStaleSeq    = doc["skipStale"]| lx.cfgSkipStaleSeq;
+    {
+        int p = doc["e131Prio"] | (int)lx.cfgE131MinPriority;
+        if (p < 0)   p = 0;
+        if (p > 200) p = 200;
+        lx.cfgE131MinPriority = (uint8_t)p;
+    }
+    {
+        long h = doc["holdMs"] | (long)lx.cfgHoldTimeoutMs;
+        if (h < 0)        h = 0;
+        if (h > 3600000)  h = 3600000;     // 1 h ceiling — sanity
+        lx.cfgHoldTimeoutMs = (uint32_t)h;
+    }
 
     // Ethernet — static fields are accepted even when DHCP is on (used on
     // first enable of static mode). Empty / "0.0.0.0" = unset (0).
@@ -200,7 +270,13 @@ void Lumox::_registerRoutes() {
         doc["apPass"]     = cfgApPassword;
         doc["staSsid"]    = cfgStaSsid;
         doc["staPass"]    = cfgStaPassword;
+        doc["devName"]    = cfgDeviceName;
         doc["universe"]   = cfgUniverse;
+        doc["protocol"]   = protocolTypeName(cfgProtocol);
+        doc["e131Mc"]     = cfgE131Multicast;
+        doc["skipStale"]  = cfgSkipStaleSeq;
+        doc["e131Prio"]   = cfgE131MinPriority;
+        doc["holdMs"]     = cfgHoldTimeoutMs;
         doc["ethDhcp"]    = cfgEthDhcp;
         doc["ethIp"]      = cfgEthIp.toString();
         doc["ethGw"]      = cfgEthGw.toString();
@@ -408,7 +484,13 @@ String Lumox::buildStatusJson() {
     eth["speed"] = _ethSpeedMbps;
     eth["fdx"]   = _ethFullDuplex;
 
-    // Art-Net
+    // Active protocol — top-level for quick UI lookup. Sources may extend the
+    // "src" block via their own httpStatus() (priority for E1.31, syncs/inSync
+    // for Art-Net, etc.).
+    doc["proto"] = protocolTypeName(cfgProtocol);
+
+    // Source-agnostic ingress stats (named "artnet" historically — content is
+    // protocol-neutral, fed by Lumox::feedDmxFrame regardless of source type).
     auto an = doc["artnet"].to<JsonObject>();
     an["uni"]      = cfgUniverse;
     an["pkts"]     = statsArtnetPackets;
@@ -418,9 +500,7 @@ String Lumox::buildStatusJson() {
     an["sender"]   = statsArtnetSender.toString();
     an["luni"]     = statsArtnetLastUni;
     an["swaps"]    = statsArtnetSenderSwaps;
-    an["syncs"]    = statsArtSyncs;
-    an["inSync"]   = statsInSyncMode;
-    an["badProto"] = statsArtNetBadProto;
+    if (_source) _source->httpStatus(an);   // protocol-specific extras
 
     // Manual override state
     auto man = doc["manual"].to<JsonObject>();
@@ -440,6 +520,9 @@ String Lumox::buildStatusJson() {
     dmx["rateHz"]     = statsDmxRateHz;
     dmx["rateTenths"] = statsDmxRateTenths;
     dmx["maxMutexUs"] = statsDmxMaxMutexUs;
+#if LUMOX_CH1_PIN_NONZERO
+    dmx["ch1Pin"]     = cfgCh1PinNonzero;
+#endif
 
     // Mutex-spike timeline (oldest → newest). Snapshot indices once so a
     // concurrent _dmxTask write doesn't shift entries mid-emit.

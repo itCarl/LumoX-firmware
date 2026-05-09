@@ -30,6 +30,10 @@ main{max-width:1400px;margin:0 auto;padding:16px;display:grid;grid-template-colu
 #dmx-grid{display:grid;grid-template-columns:repeat(32,1fr);gap:2px;padding:10px}
 .cl{background:#2e2e2e;color:#666;font:10px/1 monospace;text-align:center;padding:5px 2px;border-radius:2px}
 .cl.on{color:#111;font-weight:700}
+/* Slot-1 pin indicator — red outline (no border, no layout shift) when the
+   "Pin Ch 1 ≥ 1" config toggle is on. Outline-offset keeps the ring tight
+   inside the grid spacing. */
+.cl.pin1{outline:2px solid #e03030;outline-offset:-1px}
 #iface-bar{position:fixed;left:0;right:0;bottom:0;height:26px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;font:11px/1 'Consolas',monospace;letter-spacing:.8px;background:#2a2a2a;color:#888;border-top:1px solid #3a3a3a;z-index:50}
 #iface-bar.eth{background:#1a3a5a;color:#bfdcff;border-top-color:#2a5a8a}
 #iface-bar.sta{background:#1a4020;color:#b0f0c0;border-top-color:#2a6030}
@@ -73,14 +77,22 @@ body{padding-bottom:30px}
     </div>
   </div>
   <div class="card">
-    <h3>Art-Net</h3>
+    <h3 id="src-title">Input</h3>
     <div class="card-body">
-      <div class="kv"><span>UDP Port</span><span>6454</span></div>
+      <div class="kv"><span>Protocol</span><span id="src-proto">—</span></div>
+      <div class="kv"><span>UDP Port</span><span id="src-port">—</span></div>
       <div class="kv"><span>Universe</span><span id="a-uni">—</span></div>
       <div class="kv"><span>Packets</span><span id="a-pkts">—</span></div>
       <div class="kv"><span>Last Packet</span><span id="a-last">—</span></div>
       <div class="kv"><span>Sender</span><span id="a-from">—</span></div>
-      <div class="kv"><span>Last Uni Seen</span><span id="a-luni">—</span></div>
+      <!-- Art-Net specific -->
+      <div class="kv" id="r-luni"><span>Last Uni Seen</span><span id="a-luni">—</span></div>
+      <div class="kv" id="r-sync" style="display:none"><span>ArtSync</span><span id="a-sync">—</span></div>
+      <!-- E1.31 specific -->
+      <div class="kv" id="r-prio" style="display:none"><span>Priority</span><span id="a-prio">—</span></div>
+      <div class="kv" id="r-mc"   style="display:none"><span>Multicast</span><span id="a-mc">—</span></div>
+      <!-- API stub -->
+      <div class="kv" id="r-api"  style="display:none"><span>Status</span><span id="a-api">—</span></div>
     </div>
   </div>
   <div class="card">
@@ -134,11 +146,33 @@ function doS(d){
   document.getElementById('i-eth-ip').textContent= eth.up?eth.ip:'—';
   document.getElementById('i-eth-link').textContent= eth.up?(eth.speed+' Mbps '+(eth.fdx?'FDX':'HDX')):'—';
   document.getElementById('i-eth-mac').textContent = eth.up?eth.mac:'—';
+  // Source card — title + per-protocol rows. The "artnet" stats block is
+  // protocol-neutral; sources extend it with their own keys via httpStatus().
+  var proto=(d.proto||'artnet'), labels={artnet:'Art-Net',e131:'sACN E1.31',api:'API'},
+      ports={artnet:6454,e131:5568,api:'—'};
+  document.getElementById('src-title').textContent='Input · '+(labels[proto]||proto);
+  document.getElementById('src-proto').textContent=labels[proto]||proto;
+  document.getElementById('src-port').textContent=ports[proto];
   document.getElementById('a-uni').textContent=a.uni;
-  document.getElementById('a-pkts').textContent=a.pkts.toLocaleString();
+  document.getElementById('a-pkts').textContent=(a.pkts||0).toLocaleString();
   document.getElementById('a-last').textContent=fA(a.age);
   document.getElementById('a-from').textContent=a.sender||'—';
-  document.getElementById('a-luni').textContent=a.luni;
+  function show(rid,on){var e=document.getElementById(rid);if(e)e.style.display=on?'':'none'}
+  show('r-luni',proto==='artnet'); show('r-sync',proto==='artnet');
+  show('r-prio',proto==='e131');   show('r-mc',  proto==='e131');
+  show('r-api', proto==='api');
+  if(proto==='artnet'){
+    document.getElementById('a-luni').textContent=a.luni;
+    document.getElementById('a-sync').textContent=(a.syncs||0)+(a.inSync?' (active)':'');
+  } else if(proto==='e131'){
+    // "Priority" shows: <active sender prio> · min <configured threshold>.
+    // The two come from different places — sender prio is per-packet; min is
+    // the cfgE131MinPriority filter that drops anything below it.
+    document.getElementById('a-prio').textContent=(a.priority||0)+' · min '+(a.minPrio||0);
+    document.getElementById('a-mc').textContent=a.multicast?'joined':'unicast only';
+  } else if(proto==='api'){
+    document.getElementById('a-api').textContent=a.status||a.note||'not implemented';
+  }
   document.getElementById('s-up').textContent=fU(s.up);
   document.getElementById('s-heap').textContent=fB(s.heap)+' / '+fB(s.heapTotal);
   document.getElementById('s-cpu').textContent=s.mhz+' MHz';
@@ -146,15 +180,19 @@ function doS(d){
   document.getElementById('s-flash').textContent=fB(s.flash);
   // DMX rate from health stats — falls back to nominal if unmeasured.
   document.getElementById('d-rate').textContent=h.rateHz?(h.rateHz+'.'+(h.rateTenths||0)+' Hz'):'~44.0 Hz';
+  // Slot-1 pin indicator — outline cell 1 when the config flag is active.
+  C[0].classList.toggle('pin1', !!h.ch1Pin);
 }
 function doD(buf){
   var act=0,mx=0;
   for(var i=0;i<512;i++){
     var v=buf[i],c=C[i];
+    // Preserve modifier classes (e.g. .pin1) across the className rewrite below.
+    var pin=c.classList.contains('pin1')?' pin1':'';
     if(v>0)act++;
     if(v>mx)mx=v;
-    if(v>0){c.textContent=v;c.className='cl on';c.style.background='rgba(74,158,255,'+(0.3+0.7*v/255)+')';}
-    else{c.textContent=i+1;c.className='cl';c.style.background='';}
+    if(v>0){c.textContent=v;c.className='cl on'+pin;c.style.background='rgba(74,158,255,'+(0.3+0.7*v/255)+')';}
+    else{c.textContent=i+1;c.className='cl'+pin;c.style.background='';}
   }
   document.getElementById('d-act').textContent=act+' / 512';
   document.getElementById('d-max').textContent=mx;
@@ -187,6 +225,10 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
   else if(host===mdns){var m=(n.mode||'').toLowerCase();if(m==='eth')tag('eth','ETHERNET (mDNS)');else if(m==='sta')tag('sta','WIFI (STA, mDNS)');else if(m==='ap')tag('ap','WIFI (AP, mDNS)')}
   document.getElementById('iface-bar').className=cls;
   document.getElementById('iface-label').textContent=label;
+  // Device name → header bar + tab title (if set on /config).
+  var dn=n.name||'',bar=document.getElementById('devname-bar');
+  if(bar)bar.textContent=dn;
+  if(dn)document.title=dn+' · Lumox · Dashboard';
 }).catch(()=>{});
 </script>
 </body></html>

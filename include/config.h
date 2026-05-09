@@ -15,6 +15,12 @@
 // Art-Net
 #define DEFAULT_ARTNET_UNIVERSE 0
 
+// Maximum number of distinct universes Lumox accepts (per-show ceiling).
+// Art-Net is 0-based: valid range 0..LUMOX_MAX_UNIVERSE-1 (e.g. 0..41 for 42).
+// E1.31 is 1-based:  valid range 1..LUMOX_MAX_UNIVERSE     (e.g. 1..42 for 42).
+// Both yield the same total count. /api/config clamps + auto-bumps on save.
+#define LUMOX_MAX_UNIVERSE      42
+
 // mDNS hostname + ArtPollReply short name (MAC suffix appended automatically).
 #define DEFAULT_DEVICE_NAME     "Lumox"
 

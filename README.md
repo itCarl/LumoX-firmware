@@ -323,3 +323,7 @@ Production builds compile every `LOG_*` macro to `((void)0)` and never call `Ser
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+
+## Trademarks
+
+Art-Net™ Designed by and Copyright Artistic Licence Holdings Ltd.

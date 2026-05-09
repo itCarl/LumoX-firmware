@@ -15,9 +15,20 @@ main{max-width:700px;margin:0 auto;padding:16px}
 .card h3{background:#2e2e2e;padding:8px 12px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#888;border-bottom:1px solid #3a3a3a}
 .fr{display:grid;grid-template-columns:140px 1fr;align-items:center;padding:8px 12px;gap:10px;border-bottom:1px solid #2e2e2e}
 .fr:last-child{border-bottom:0}
+/* When a hint immediately follows a row, it describes that row — drop the
+   divider so they read as a pair, not as separate items split by a line. */
+.fr:has(+ .hint){border-bottom:0}
+.hint + .fr{border-top:1px solid #2e2e2e}
 .fr label{color:#888;font-size:12px}
 .fr input,.fr select{background:#2e2e2e;border:1px solid #3a3a3a;border-radius:3px;color:#d8d8d8;padding:6px 8px;outline:none;font:inherit;width:100%}
 .fr input:focus,.fr select:focus{border-color:#4a9eff}
+/* Toggle-switch styling for checkboxes — overrides the generic .fr input rule above. */
+.fr input[type="checkbox"]{-webkit-appearance:none;-moz-appearance:none;appearance:none;width:38px;height:20px;flex:none;padding:0;background:#2e2e2e;border:1px solid #3a3a3a;border-radius:11px;position:relative;cursor:pointer;transition:background .18s,border-color .18s}
+.fr input[type="checkbox"]::after{content:'';position:absolute;left:2px;top:2px;width:14px;height:14px;border-radius:50%;background:#888;transition:left .18s,background .18s}
+.fr input[type="checkbox"]:hover{border-color:#4a9eff66}
+.fr input[type="checkbox"]:checked{background:#4a9eff;border-color:#4a9eff}
+.fr input[type="checkbox"]:checked::after{left:20px;background:#fff}
+.fr input[type="checkbox"]:focus-visible{box-shadow:0 0 0 2px #4a9eff44}
 .actions{padding:12px;display:flex;gap:8px;flex-wrap:wrap}
 button{background:#2e2e2e;border:1px solid #3a3a3a;color:#d8d8d8;padding:8px 16px;border-radius:4px;cursor:pointer;font:inherit;transition:.15s}
 button:hover{background:#383838}
@@ -29,6 +40,10 @@ button.danger:hover{background:#501515}
 .msg.ok{background:#1a4020;color:#8fd8a0;display:block}
 .msg.err{background:#3a1010;color:#ff8060;display:block}
 .hint{color:#666;font-size:11px;padding:0 12px 8px;font-style:italic}
+/* Per-row hints (those that follow a .fr) align with the input column —
+   label-col 140px + card padding-left 12px + gap 10px = 162px indent.
+   Section-level hints (right after an <h3>) keep full-width default. */
+.fr + .hint{padding:4px 12px 8px 162px}
 #iface-bar{position:fixed;left:0;right:0;bottom:0;height:26px;padding:0 12px;display:flex;align-items:center;justify-content:space-between;font:11px/1 'Consolas',monospace;letter-spacing:.8px;background:#2a2a2a;color:#888;border-top:1px solid #3a3a3a;z-index:50}
 #iface-bar.eth{background:#1a3a5a;color:#bfdcff;border-top-color:#2a5a8a}
 #iface-bar.sta{background:#1a4020;color:#b0f0c0;border-top-color:#2a6030}
@@ -73,26 +88,41 @@ body{padding-bottom:30px}
     <div class="fr eth-static"><label>Gateway</label><input id="ethGw"  type="text" placeholder="192.168.1.1"></div>
     <div class="fr eth-static"><label>Subnet</label><input id="ethSub" type="text" placeholder="255.255.255.0"></div>
     <div class="fr eth-static"><label>DNS</label><input id="ethDns" type="text" placeholder="192.168.1.1"></div>
-    <div class="fr"><label>Disable WiFi</label>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input id="wifiOffEth" type="checkbox">
-        <span style="color:#888;font-size:11px">Turn WiFi off while Ethernet is connected (web UI stays reachable on ETH)</span>
-      </label>
-    </div>
+    <div class="fr"><label>Disable WiFi</label><input id="wifiOffEth" type="checkbox"></div>
+    <div class="hint">Turn WiFi off while Ethernet is connected (web UI stays reachable on ETH).</div>
   </div>
   <div class="card">
-    <h3>Art-Net</h3>
-    <div class="fr"><label>Universe</label><input id="universe" type="number" min="0" max="32767"></div>
+    <h3>Device</h3>
+    <div class="hint">Friendly name shown in browser tab, navbar, mDNS TXT, ArtPollReply ShortName. Max 32 characters.</div>
+    <div class="fr"><label>Name</label><input id="devName" type="text" maxlength="32" placeholder="Stage Left"></div>
+  </div>
+  <div class="card">
+    <h3>Network DMX Input</h3>
+    <div class="hint">Lighting protocol Lumox listens on. Only one is active; switch and Save reboots the device. Universe applies to whichever is selected.</div>
+    <div class="fr"><label>Protocol</label>
+      <select id="protocol" onchange="onProtocolChange()">
+        <option value="artnet">Art-Net (UDP 6454)</option>
+        <option value="e131">sACN E1.31 (UDP 5568)</option>
+        <option value="api" disabled>API (reserved)</option>
+      </select>
+    </div>
+    <div class="fr"><label>Universe</label><input id="universe" type="number" min="0" max="42"></div>
+    <div class="hint" id="uni-hint">Art-Net: 0..41. sACN E1.31: 1..42 (universe 0 is reserved by spec). 42 universes total.</div>
+    <div class="fr e131-only" style="display:none"><label>Multicast</label><input id="e131Mc" type="checkbox"></div>
+    <div class="hint e131-only" style="display:none">Join IGMP group 239.255.U.U on every active interface (recommended). Unicast still accepted on the same socket.</div>
+    <div class="fr e131-only" style="display:none"><label>Min Priority</label><input id="e131Prio" type="number" min="0" max="200" placeholder="0"></div>
+    <div class="hint e131-only" style="display:none">E1.31 frames below this priority are dropped. 0 = accept all (default). Useful to ignore preview / low-priority feeds.</div>
+    <div class="fr"><label>Skip stale seq</label><input id="skipStale" type="checkbox"></div>
+    <div class="hint">Drop strictly-older sequence numbers from the same sender (recommended). Disable only when debugging a sender that recycles seq bytes.</div>
+    <div class="fr"><label>Hold timeout</label>
+      <input id="holdMs" type="number" min="0" max="3600000" step="100" placeholder="0">
+    </div>
+    <div class="hint">Milliseconds to hold the last frame after the input goes silent before blackout. Default 5000 (5 s grace for a console hiccup, then go dark). 0 = hold forever (most flicker-resistant — choose if your console can disappear mid-show).</div>
   </div>
   <div class="card">
     <h3>DMX Output</h3>
     <div class="hint">Workaround for cheap moving-head receivers that jitter when slot 1 is 0x00. Forces channel 1 to value 1 on the wire, so the start code (0x00) is never followed by another zero. Only enable when channel 1 is unused (fixtures patched ≥ 2).</div>
-    <div class="fr"><label>Pin Ch 1 ≥ 1</label>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-        <input id="ch1Pin" type="checkbox">
-        <span style="color:#888;font-size:11px">Force DMX channel 1 to value 1 (workaround for receiver jitter)</span>
-      </label>
-    </div>
+    <div class="fr"><label>Pin Ch 1 ≥ 1</label><input id="ch1Pin" type="checkbox"></div>
   </div>
   <div class="card">
     <div class="actions">
@@ -108,6 +138,30 @@ function ethMode(){
   var on=document.getElementById('ethDhcp').value==='0';
   document.querySelectorAll('.eth-static').forEach(function(e){e.style.display=on?'':'none';});
 }
+// Live-bump universe to 1 when user picks E1.31 with universe 0 still in field.
+// Server-side validation does the same on save — JS hint just makes it visible.
+var _prevProto='';
+function onProtocolChange(){
+  var p=document.getElementById('protocol').value;
+  var u=document.getElementById('universe');
+  var n=parseInt(u.value,10)||0;
+  u.min = (p==='e131') ? 1 : 0;
+  u.max = (p==='e131') ? 42 : 41;
+  // Auto-step on protocol switch so the universe matches the new protocol's
+  // default. Only fires when the dropdown actually changed, so a deliberate
+  // Art-Net universe 1 (or E1.31 universe other than 1) survives reloads.
+  if(_prevProto==='artnet' && p==='e131' && n===0) u.value=1;
+  else if(_prevProto==='e131' && p==='artnet' && n===1) u.value=0;
+  // Range enforcement
+  n=parseInt(u.value,10)||0;
+  if(p==='e131' && n<1) u.value=1;
+  if(n>+u.max) u.value=u.max;
+  _prevProto=p;
+  // Show / hide E1.31-only rows
+  document.querySelectorAll('.e131-only').forEach(function(e){
+    e.style.display = (p==='e131') ? '' : 'none';
+  });
+}
 function ipOrBlank(s){return (s&&s!=='0.0.0.0')?s:'';}
 async function load(){
   var r=await fetch('/api/config');var c=await r.json();
@@ -115,7 +169,14 @@ async function load(){
   document.getElementById('apPass').value=c.apPass;
   document.getElementById('staSsid').value=c.staSsid;
   document.getElementById('staPass').value=c.staPass;
+  document.getElementById('devName').value=c.devName||'';
   document.getElementById('universe').value=c.universe;
+  document.getElementById('protocol').value=c.protocol||'artnet';
+  document.getElementById('e131Mc').checked    = c.e131Mc===true;
+  document.getElementById('skipStale').checked = c.skipStale!==false;
+  document.getElementById('e131Prio').value    = c.e131Prio||0;
+  document.getElementById('holdMs').value      = (c.holdMs!==undefined)?c.holdMs:5000;
+  onProtocolChange();
   document.getElementById('ethDhcp').value=c.ethDhcp?'1':'0';
   document.getElementById('ethIp').value  = ipOrBlank(c.ethIp);
   document.getElementById('ethGw').value  = ipOrBlank(c.ethGw);
@@ -132,7 +193,13 @@ async function save(){
     apPass:document.getElementById('apPass').value,
     staSsid:document.getElementById('staSsid').value,
     staPass:document.getElementById('staPass').value,
+    devName:document.getElementById('devName').value.trim(),
     universe:+document.getElementById('universe').value,
+    protocol:document.getElementById('protocol').value,
+    e131Mc:document.getElementById('e131Mc').checked,
+    skipStale:document.getElementById('skipStale').checked,
+    e131Prio:+document.getElementById('e131Prio').value||0,
+    holdMs:+document.getElementById('holdMs').value||0,
     ethDhcp:dhcp,
     ethIp:document.getElementById('ethIp').value.trim(),
     ethGw:document.getElementById('ethGw').value.trim(),
@@ -173,6 +240,9 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
   else if(host===mdns){var m=(n.mode||'').toLowerCase();if(m==='eth')tag('eth','ETHERNET (mDNS)');else if(m==='sta')tag('sta','WIFI (STA, mDNS)');else if(m==='ap')tag('ap','WIFI (AP, mDNS)')}
   document.getElementById('iface-bar').className=cls;
   document.getElementById('iface-label').textContent=label;
+  var dn=n.name||'',bar=document.getElementById('devname-bar');
+  if(bar)bar.textContent=dn;
+  if(dn)document.title=dn+' · Lumox · Config';
 }).catch(()=>{});
 </script>
 </body></html>

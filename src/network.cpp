@@ -37,6 +37,17 @@ void Lumox::loadConfig() {
     cfgUniverse    = p.getUShort("universe", DEFAULT_ARTNET_UNIVERSE);
     cfgDeviceName  = p.getString("devName",  String(DEFAULT_DEVICE_NAME) + macSuffix());
 
+    // Active ingress protocol — Art-Net by default. Stored as uint8_t
+    // (0=ArtNet, 1=E131, 2=Api). Unknown values fall back to Art-Net at
+    // beginProtocol() time.
+    cfgProtocol    = (ProtocolType)p.getUChar("proto", (uint8_t)ProtocolType::ArtNet);
+
+    // Per-source toggles — see Lumox.h for semantics.
+    cfgE131Multicast   = p.getBool ("e131Mc",   false);
+    cfgSkipStaleSeq    = p.getBool ("skipStale", true);
+    cfgE131MinPriority = p.getUChar("e131Prio", 0);
+    cfgHoldTimeoutMs   = p.getUInt ("holdMs",   5000);
+
     // Pre-parse string defaults from config.h once so each Preferences fallback
     // gets a 32-bit IP value rather than the literal 0 → field would otherwise
     // appear blank on first boot.
@@ -73,6 +84,11 @@ void Lumox::saveConfig() {
     p.putString("staPass",  cfgStaPassword);
     p.putUShort("universe", cfgUniverse);
     p.putString("devName",  cfgDeviceName);
+    p.putUChar ("proto",    (uint8_t)cfgProtocol);
+    p.putBool  ("e131Mc",   cfgE131Multicast);
+    p.putBool  ("skipStale",cfgSkipStaleSeq);
+    p.putUChar ("e131Prio", cfgE131MinPriority);
+    p.putUInt  ("holdMs",   cfgHoldTimeoutMs);
 
     p.putBool  ("ethDhcp",  cfgEthDhcp);
     p.putUInt  ("ethIp",    (uint32_t)cfgEthIp);
@@ -328,14 +344,14 @@ void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/)
                           ETH.subnetMask().toString().c_str(),
                           ETH.dnsIP().toString().c_str());
             _applyWifiOnEthPolicy();
-            announceArtNetNode();
+            announceProtocolNode();
             break;
         }
 
         case ARDUINO_EVENT_ETH_LOST_IP:
             LOG_PRINTLN("[ETH] lost IP");
             _ethUp = false;
-            announceArtNetNode();
+            announceProtocolNode();
             _applyWifiOnEthPolicy();
             break;
 
@@ -346,7 +362,7 @@ void Lumox::_onEthEvent(arduino_event_id_t event, arduino_event_info_t /*info*/)
             _ethSpeedMbps  = 0;
             _ethFullDuplex = false;
             _applyWifiOnEthPolicy();
-            announceArtNetNode();
+            announceProtocolNode();
             break;
 
         case ARDUINO_EVENT_ETH_STOP:
@@ -414,16 +430,15 @@ void Lumox::debugEthStatus() {
 #endif
 }
 
-// ── Unsolicited ArtPollReply broadcast ────────────────────────────────────
-// Art-Net spec: nodes MAY send unsolicited ArtPollReply on state change so
-// controllers update their node list without an explicit discovery round.
-//
-// Called from the WiFi/ETH event task — *not* the Art-Net RX task that owns
-// _udp. We just flip a flag; the RX task drains it and emits the broadcast
-// from its own context, keeping all UDP TX single-threaded.
-void Lumox::announceArtNetNode() {
-    _pendingAnnounce = true;
-    LOG_PRINTF("[ArtNet] Unsolicited ArtPollReply queued — reporting IP %s\n",
+// ── Network-change notification to the active source ──────────────────────
+// Called from the WiFi/ETH event task — *not* the protocol RX task that owns
+// the source's UDP socket. We flip a flag; the RX task drains it on its next
+// iteration and calls _source->onNetworkChange() so all TX paths stay on a
+// single thread. ArtNet uses this for unsolicited PollReply, E1.31 for
+// IGMP re-join on the new netif.
+void Lumox::announceProtocolNode() {
+    _pendingNetEvent = true;
+    LOG_PRINTF("[Proto] Network change queued — reporting IP %s\n",
                   getIP().toString().c_str());
 }
 

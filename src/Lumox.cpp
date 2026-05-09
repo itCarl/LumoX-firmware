@@ -14,8 +14,7 @@ void Lumox::begin() {
 
     loadConfig();          // from NVS (or defaults on first boot)
 
-    // Cache MAC once — efuse-backed, available before WiFi.begin(). Avoids
-    // a syscall on every ArtPollReply (poll storms hit this hot).
+    // Cache MAC once — efuse-backed, available before WiFi.begin().
     WiFi.macAddress(_macCached);
 
     // Ethernet is the PREFERRED interface — probe + IP acquire before WiFi
@@ -23,54 +22,38 @@ void Lumox::begin() {
     beginEthernet();
     beginNetwork();        // WiFi STA / AP fallback (informed by _ethUp)
     beginWebServer();      // AsyncWebServer binds to lwIP — reachable on WiFi + ETH
-    beginArtNet();
+    beginProtocol();       // Art-Net / E1.31 / API per cfgProtocol
     beginDmx();
 
-    // DMX output on Core 1 — prio 5 preempts the Arduino loopTask (prio 1) and
-    // AsyncTCP (prio 3) so HTTP/OTA traffic can't delay break/MAB. Stays well
-    // below tcpip_thread (18) and WiFi tasks (23) so RX path is untouched.
+    // DMX output on Core 1 — prio 5 preempts loopTask (1) and AsyncTCP (3).
     if (_dmxReady) {
         xTaskCreatePinnedToCore(_dmxTask, "DMX", 4096, this, /*prio*/ 5, nullptr, /*core*/ 1);
     }
 
-    // Art-Net RX task on Core 1 — prio 4 preempts loopTask (1) + AsyncTCP (3),
-    // yields to the DMX task (5). Decoupled drain so HTTP handlers / mDNS /
+    // Protocol RX task on Core 1 — prio 4. Decoupled drain so HTTP / mDNS /
     // captive-portal DNS can't delay UDP pickup. UDP TX from this task is the
-    // *only* TX path — cross-task announces queue via _pendingAnnounce.
-    xTaskCreatePinnedToCore(_artNetTaskWrap, "ArtNet", 8192, this, /*prio*/ 4,
-                            &_artNetTaskH, /*core*/ 1);
+    // *only* TX path — cross-task announces queue via _pendingNetEvent.
+    xTaskCreatePinnedToCore(_protocolTaskWrap, "Proto", 8192, this, /*prio*/ 4,
+                            &_protoTaskH, /*core*/ 1);
 
     digitalWrite(LED_PIN, HIGH);
     LOG_PRINTLN("[Lumox] Ready.\n");
 }
 
 void Lumox::loop() {
-    // Art-Net RX (pollArtNet drain + loopArtNet housekeeping) runs on its own
-    // task — see _artNetTaskWrap. loop() handles UI / LED / ETH-shim only.
-
-    // Drive WebSocket + DNS + OTA. AsyncWebServer no longer needs a loop tick
-    // — it runs on AsyncTCP's own task — so HTTP requests + OTA uploads no
-    // longer stall ArtDMX intake.
+    // Protocol RX (drain + housekeeping) runs on its own task — see
+    // _protocolTaskWrap. loop() handles UI / LED / ETH-shim only.
     loopWebServer();
-
-    // Status LED (stale-link indicator)
     _updateLed();
-
-    // ETH plug/unplug + IP changes are event-driven via _onEthEvent() — kept
-    // as a no-op shim so the call site stays stable.
     loopEthernet();
 
     const uint32_t now = millis();
 
-    // Periodic state push to all WebSocket clients (~5 Hz)
     if (now - _lastWsPushMs >= 200) {
         _lastWsPushMs = now;
         if (_ws.count() > 0) pushStateToClients();
     }
 
-    // Periodic ETH status dump — debug builds only (LUMOX_DEBUG=1). Helps
-    // diagnose "W5500 not showing up on the router" on the bench. Production
-    // builds skip the timer entirely so loop() is one branch lighter.
 #if LUMOX_DEBUG
     const uint32_t dbgInterval = _ethUp ? 30000 : 5000;
     if (now - _ethLastDbgMs >= dbgInterval) {
@@ -79,8 +62,6 @@ void Lumox::loop() {
     }
 #endif
 
-    // DMX-health change detector. Logs once on transition + every 10 s while
-    // unhealthy — avoids serial spam but makes flicker causes visible.
     static bool     lastDmxOk     = true;
     static uint32_t lastHealthMs  = 0;
     const DmxHealth hh = dmxHealth();
@@ -105,15 +86,97 @@ void Lumox::loop() {
     }
 }
 
+// ── Protocol lifecycle ─────────────────────────────────────────────────────
+// Single active source, picked by cfgProtocol. Today: created once in begin()
+// — switching protocols requires a reboot (cleaner socket teardown).
+void Lumox::beginProtocol() {
+    if (_source) {
+        // Defensive — should never happen at boot, but keep the path safe
+        // if a future hot-swap path calls beginProtocol() twice.
+        _source->end();
+        delete _source;
+        _source = nullptr;
+    }
+    _source = createDmxSource(cfgProtocol);
+    if (!_source) {
+        LOG_PRINTF("[Proto] Unknown protocol type %u — defaulting to Art-Net\n",
+                      (unsigned)cfgProtocol);
+        cfgProtocol = ProtocolType::ArtNet;
+        _source = createDmxSource(cfgProtocol);
+    }
+    LOG_PRINTF("[Proto] Active source: %s\n", _source->name());
+    if (!_source->begin()) {
+        LOG_PRINTF("[Proto] Source %s failed to start\n", _source->name());
+    }
+}
+
+void Lumox::endProtocol() {
+    if (!_source) return;
+    _source->end();
+    delete _source;
+    _source = nullptr;
+}
+
+// ── Unified DMX ingestion ─────────────────────────────────────────────────
+// Sources call this after their own validation (header / sequence / priority).
+// Single-sender lock + sender-swap detection live here so every protocol
+// benefits without reimplementing the policy.
+bool Lumox::feedDmxFrame(const uint8_t* slots, uint16_t len, IPAddress sender) {
+    if (len > 512) len = 512;
+
+    // Single-sender lock: while the current primary is live (< stale window),
+    // reject packets from any other IP. Stale primary → next sender takes over.
+    if (statsArtnetLastMs != 0 && sender != statsArtnetSender) {
+        const uint32_t since = millis() - statsArtnetLastMs;
+        if (since < DMX_LINK_STALE_MS) {
+            statsArtnetLocked++;
+            return false;
+        }
+    }
+
+    // Sender-swap detection
+    if (statsArtnetSender != sender) {
+        if ((uint32_t)statsArtnetSender != 0) {
+            statsArtnetSenderSwaps++;
+            statsArtnetLastSwapMs = millis();
+            LOG_PRINTF("[DMX] ⚠ sender swap %s → %s (total %u)\n",
+                          statsArtnetSender.toString().c_str(),
+                          sender.toString().c_str(),
+                          (unsigned)statsArtnetSenderSwaps);
+        }
+        statsArtnetSender = sender;
+    }
+
+    portENTER_CRITICAL(&_dmxLock);
+    memcpy(&dmxBuffer[1], slots, len);
+    dmxChannelCount = len;
+    portEXIT_CRITICAL(&_dmxLock);
+
+    statsArtnetPackets++;
+    statsArtnetLastMs = millis();
+    return true;
+}
+
+void Lumox::setIdentify(uint32_t durationMs) {
+    _identifyUntilMs = (durationMs > 0) ? (millis() + durationMs) : 0;
+}
+
+void Lumox::clearDmxBuffer() {
+    portENTER_CRITICAL(&_dmxLock);
+    memset(&dmxBuffer[1], 0, 512);
+    portEXIT_CRITICAL(&_dmxLock);
+}
+
 // ── Status LED ─────────────────────────────────────────────────────────────
-// Identify (OpAddress/OpCommand) → fast blink (200 ms period)
-// Receiving Art-Net              → steady ON
-// No ArtDMX > stale-ms           → slow pulse (60 ms on every 1200 ms)
-// DMX output itself keeps transmitting the last buffer regardless.
+// Identify (any source's locate cmd) → fast blink (200 ms period)
+// Receiving DMX                      → steady ON
+// No DMX > stale-ms                  → slow pulse
 void Lumox::_updateLed() {
     const uint32_t now = millis();
 
-    if (_identifyUntilMs > now) {
+    const bool identify = (_identifyUntilMs > now) ||
+                          (_source && _source->identifyActive());
+    if (identify) {
         digitalWrite(LED_PIN, (now % 200) < 100 ? HIGH : LOW);
         return;
     }
@@ -127,9 +190,6 @@ void Lumox::_updateLed() {
 }
 
 // ── Manual override API ───────────────────────────────────────────────────
-// setManual: ch in [1..512], val in [0..255] = force; val = -1 = release.
-// Maintains manualActiveBits + manualActiveCount in O(1) so batch POSTs of
-// dozens of channels no longer trigger a 512-iteration rescan per call.
 void Lumox::setManual(int ch, int val) {
     if (ch < 1 || ch > 512) return;
     if (val < -1 || val > 255) return;
@@ -138,7 +198,7 @@ void Lumox::setManual(int ch, int val) {
     const bool nowActive = (val >= 0);
     manualValue[ch] = (int16_t)val;
 
-    if (wasActive == nowActive) return;       // value-only change; bit unchanged
+    if (wasActive == nowActive) return;
 
     const uint32_t bit  = 1u << ((ch - 1) & 31);
     const int      word = (ch - 1) >> 5;
@@ -165,16 +225,13 @@ void Lumox::setManualEnabled(bool on) {
 }
 
 // ── FreeRTOS task: continuously transmits DMX (~44 Hz) ─────────────────────
-// Also measures signal-quality metrics consumed by dmxHealth():
-//   • mutex-take duration (contention with Art-Net parser)
-//   • actual frame rate (drops when writeDmx fails or blocks too long)
 void Lumox::_dmxTask(void* param) {
     auto& ctrl = *static_cast<Lumox*>(param);
 
     uint8_t  frame[513];
     uint32_t rateSampleCount = 0;
     uint32_t rateSampleStart = millis();
-    constexpr uint32_t RATE_SAMPLE_FRAMES = 50;   // ~1 s at 44 Hz
+    constexpr uint32_t RATE_SAMPLE_FRAMES = 50;
 
     for (;;) {
         const uint32_t lockStart = micros();
@@ -185,9 +242,6 @@ void Lumox::_dmxTask(void* param) {
 
         if (lockUs > ctrl.statsDmxMaxMutexUs) ctrl.statsDmxMaxMutexUs = lockUs;
 
-        // Rolling decay of the high-water mark — keep MUTEX_DECAY_MS of recent
-        // history. Avoids /health staying pinned UNCLEAN forever after a single
-        // boot-time spike (typical: WiFi assoc + DHCP all on first second).
         const uint32_t nowMs = millis();
         if (nowMs - ctrl._mutexDecayMs >= MUTEX_DECAY_MS) {
             uint32_t recentMax = 0;
@@ -201,51 +255,47 @@ void Lumox::_dmxTask(void* param) {
             ctrl._mutexDecayMs      = nowMs;
         }
 
-        // Ring-buffer log of every spike above the threshold so /health can
-        // show a timeline of contention events, not just the high-water mark.
         if (lockUs > Lumox::MUTEX_LOG_THRESHOLD_US) {
             ctrl._mutexLog[ctrl._mutexLogHead] = { millis(), lockUs };
             ctrl._mutexLogHead = (ctrl._mutexLogHead + 1) % Lumox::MUTEX_LOG_SIZE;
             if (ctrl._mutexLogCount < Lumox::MUTEX_LOG_SIZE) ctrl._mutexLogCount++;
         }
 
-        // Manual override overlay — applied AFTER the Art-Net snapshot so
-        // user-driven channels win over incoming ArtDMX. Iterates the active
-        // bitmap (set bits only) — sparse overrides skip the 512-channel scan.
+        // Hold-last-frame timeout. cfgHoldTimeoutMs == 0 → keep last frame
+        // forever (default — flicker-resistant). >0 → blackout the wire after
+        // N ms without input. Applied BEFORE the manual-override overlay so
+        // user-forced channels still come through during a blackout window.
+        if (ctrl.cfgHoldTimeoutMs > 0 && ctrl.statsArtnetLastMs != 0) {
+            const uint32_t since = millis() - ctrl.statsArtnetLastMs;
+            if (since > ctrl.cfgHoldTimeoutMs) {
+                memset(&frame[1], 0, 512);
+            }
+        }
+
         uint16_t txLen = ctrl.dmxChannelCount;
         if (ctrl.manualEnabled && ctrl.manualActive) {
-            txLen = 512;                    // ensure manual slots are sent
+            txLen = 512;
             for (int w = 0; w < 16; w++) {
                 uint32_t bits = ctrl.manualActiveBits[w];
                 while (bits) {
                     const int b  = __builtin_ctz(bits);
                     bits        &= bits - 1;
-                    const int ch = (w << 5) + b + 1;     // [1..512]
+                    const int ch = (w << 5) + b + 1;
                     const int16_t m = ctrl.manualValue[ch];
-                    if (m >= 0) frame[ch] = (uint8_t)m;  // re-check vs torn write
+                    if (m >= 0) frame[ch] = (uint8_t)m;
                 }
             }
         }
 
-        // Zero the slots beyond txLen to preserve the prior partial-frame
-        // semantics (controller sends 100 ch → channels 101..512 transmit 0).
-        // dmxBuffer keeps last values, so without this we'd send stale data.
         if (txLen < 512) memset(&frame[txLen + 1], 0, 512 - txLen);
-        frame[0] = 0;                       // start code (defensive)
+        frame[0] = 0;
 
 #if LUMOX_CH1_PIN_NONZERO
-        // Slot-1 pin: force frame[1] = 0x01 so the wire never carries
-        // start-code + slot-1 both as 0x00. Some cheap moving-head receivers
-        // misdetect that zero run as a fresh BREAK and resync mid-frame —
-        // visible as jitter on slots far beyond ch 1. Last write before TX so
-        // it overrides Art-Net + manual override on this slot.
         if (ctrl.cfgCh1PinNonzero) frame[1] = 0x01;
 #endif
 
         ctrl.writeDmx(frame);
-        // writeDmx blocks until the frame is fully sent (~22 ms)
 
-        // Rolling frame-rate measurement — recomputed every RATE_SAMPLE_FRAMES.
         if (++rateSampleCount >= RATE_SAMPLE_FRAMES) {
             const uint32_t now   = millis();
             const uint32_t dt_ms = now - rateSampleStart;
@@ -260,21 +310,20 @@ void Lumox::_dmxTask(void* param) {
     }
 }
 
-// ── FreeRTOS task: dedicated Art-Net RX + housekeeping ────────────────────
-// Pinned to Core 1, prio 4. Owns the single _udp socket — every TX path
-// (sendArtPollReply, ArtAddress reply, etc.) is reached from inside this task
-// via the parser dispatcher, so there's no cross-task UDP access. The one
-// exception is announceArtNetNode() which can fire from the WiFi/ETH event
-// task — that path now flips _pendingAnnounce instead, drained here.
-void Lumox::_artNetTaskWrap(void* param) {
+// ── Protocol task ──────────────────────────────────────────────────────────
+// Pinned to Core 1, prio 4. Owns the active source's UDP socket(s) — every TX
+// path (PollReply, ArtAddress reply, etc.) is reached from inside the source's
+// loop() so there's no cross-task UDP access. The one exception is
+// announceProtocolNode() which can fire from the WiFi/ETH event task — it
+// flips _pendingNetEvent and we drain it here.
+void Lumox::_protocolTaskWrap(void* param) {
     auto& ctrl = *static_cast<Lumox*>(param);
     for (;;) {
-        if (ctrl._pendingAnnounce) {
-            ctrl._pendingAnnounce = false;
-            ctrl.sendArtPollReply(IPAddress(255, 255, 255, 255));
+        if (ctrl._pendingNetEvent) {
+            ctrl._pendingNetEvent = false;
+            if (ctrl._source) ctrl._source->onNetworkChange();
         }
-        while (ctrl.pollArtNet()) { /* drain */ }
-        ctrl.loopArtNet();
-        vTaskDelay(1);          // yield 1 tick (~1 ms) — half a DMX frame
+        if (ctrl._source) ctrl._source->service();
+        vTaskDelay(1);
     }
 }

@@ -290,6 +290,9 @@ fetch('/api/status').then(r=>r.json()).then(d=>{
   else if(host===mdns){var m=(n.mode||'').toLowerCase();if(m==='eth')tag('eth','ETHERNET (mDNS)');else if(m==='sta')tag('sta','WIFI (STA, mDNS)');else if(m==='ap')tag('ap','WIFI (AP, mDNS)')}
   document.getElementById('iface-bar').className=cls;
   document.getElementById('iface-label').textContent=label;
+  var dn=n.name||'',bar=document.getElementById('devname-bar');
+  if(bar)bar.textContent=dn;
+  if(dn)document.title=dn+' · Lumox · Control';
 }).catch(()=>{});
 </script>
 </body></html>

@@ -11,6 +11,7 @@
 #include <esp_dmx.h>
 #include "config.h"
 #include "const.h"   // LOG_* macros + hardware pin defs
+#include "protocols/IDmxSource.h"
 
 class Lumox {
 public:
@@ -31,12 +32,12 @@ public:
     void        beginEthernet();
     String      networkHostname() const;   // mDNS + DHCP, MAC-derived, unique
     bool        isApMode()   const { return _apMode; }
+    bool        isApActive() const { return _apActive; }
     bool        isFallback() const { return _apFallback; }
     bool        isSta()      const { return !_apMode && WiFi.status() == WL_CONNECTED; }
     bool        isEth()      const { return _ethUp; }
 
     // Preference order: AP fallback → Ethernet → STA WiFi.
-    // Ethernet wins over WiFi once link+DHCP are up (wired = more reliable).
     IPAddress   getIP() const {
         if (_apMode) return WiFi.softAPIP();
         if (_ethUp)  return _ethIp;
@@ -45,46 +46,51 @@ public:
     IPAddress   getEthIp()    const { return _ethUp ? _ethIp : IPAddress(); }
     IPAddress   getStaIp()    const { return isSta() ? WiFi.localIP() : IPAddress(); }
     String      getEthMac()   const;
-    uint32_t    getEthSpeed() const { return _ethSpeedMbps; }    // 10 / 100 / 0
+    uint32_t    getEthSpeed() const { return _ethSpeedMbps; }
     bool        getEthFdx()   const { return _ethFullDuplex; }
     int         getRssi()     const { return _apMode ? 0 : WiFi.RSSI(); }
-    // Count AP clients whenever softAP is up — including AP-aux mode where
-    // _apMode is false but a phone may still be connected via the AP for config.
     int         getClients()  const { return _apActive ? WiFi.softAPgetStationNum() : 0; }
+    void        getMac(uint8_t out[6]) const { memcpy(out, _macCached, 6); }
 
-    // Called from loop() — detects link up/down, runs DHCP on plug-in,
-    // maintains DHCP lease, and prints a periodic status line.
     void        loopEthernet();
     void        debugEthStatus();
-    void        announceArtNetNode();   // unsolicited ArtPollReply broadcast
+    void        announceProtocolNode();   // unsolicited PollReply / re-join multicast
 
-    // ── Art-Net (artnet.cpp) ───────────────────────────────────────────────
-    // Single UDP socket binds to lwIP → receives on both WiFi + ETH netifs.
-    void beginArtNet();
-    bool pollArtNet();
-    void sendArtPollReply(IPAddress target);
-    void sendArtDiagData(IPAddress target, uint8_t priority, const char* text);
-    void loopArtNet();      // periodic unsolicited broadcast, sync-mode timer
+    // ── DMX source (protocols/) ────────────────────────────────────────────
+    // One active source at a time, selected by cfgProtocol. Created in
+    // beginProtocol() — switching protocols today requires a reboot.
+    void          beginProtocol();
+    void          endProtocol();
+    IDmxSource*   source() const { return _source; }
+
+    // Single ingestion path — called by every source after protocol-specific
+    // validation. Returns true if the frame was accepted and written to the
+    // live DMX buffer; false if the sender is locked out by another active
+    // primary. Updates statsArtnet* counters (the ingress stats are protocol-
+    // agnostic — the field names predate the multi-protocol refactor).
+    bool          feedDmxFrame(const uint8_t* slots, uint16_t len, IPAddress sender);
+
+    // Identify-LED locate blink. Sources call this from OpCommand "Identify"
+    // / OpAddress LED_LOCATE handling. ms=0 cancels.
+    void          setIdentify(uint32_t durationMs);
+
+    // Clear the live DMX buffer (set all 512 slots to 0). Called from
+    // OpCommand "Clear" + OpAddress AC_CLEAR_OP0.
+    void          clearDmxBuffer();
 
     // ── Device name (used by mDNS + ArtPollReply) ──────────────────────────
     String cfgDeviceName;
 
     // ── DMX output (dmx.cpp) ──────────────────────────────────────────────
     void beginDmx();
-    // Caller supplies a fully-prepared 513-byte frame ([0]=start code 0x00,
-    // [1..512]=channels). writeDmx hands it directly to esp_dmx — no inner
-    // copy or zero — so the ~44 Hz TX path runs without extra allocation.
     void writeDmx(uint8_t* frame);
-
-    // Mutex-guarded read of the 512 active DMX slots into out512. Use this
-    // from webserver/WS code to avoid torn reads while the parser writes.
     void snapshotDmx(uint8_t* out512);
 
     // ── Webserver (webserver.cpp) ──────────────────────────────────────────
     void beginWebServer();
-    void loopWebServer();              // call from the main loop
-    String buildStatusJson();          // compact status (no DMX data)
-    void   pushStateToClients();       // WebSocket broadcast
+    void loopWebServer();
+    String buildStatusJson();
+    void   pushStateToClients();
 
     // ── Config (Preferences / NVS) ─────────────────────────────────────────
     void loadConfig();
@@ -92,195 +98,145 @@ public:
     void factoryReset();
 
     // ── DMX buffer ─────────────────────────────────────────────────────────
-    uint8_t  dmxBuffer[513]  = {0};    // [0] = start code 0x00, [1..512] = channels
+    uint8_t  dmxBuffer[513]  = {0};
     uint16_t dmxChannelCount = 512;
 
     // ── Manual override (control page) ─────────────────────────────────────
-    // Per-channel override applied at DMX TX time when manualEnabled is set.
-    // -1 = AUTO (Art-Net wins), 0..255 = manual value forced. Indexed
-    // [1..512]; [0] unused. Updated by /api/manual handlers; read by
-    // _dmxTask (no mutex — int16 reads are atomic on ESP32, occasional
-    // torn updates are visually invisible).
-    //
-    // manualEnabled is the master switch — defaults OFF every boot (session-
-    // only, not persisted) so Lumox always comes up as a clean Art-Net node.
     int16_t  manualValue[513];
     bool     manualEnabled = false;
-    bool     manualActive  = false;        // true if any manualValue >= 0
-    void     setManual(int ch, int val);   // val = -1 → release that channel
+    bool     manualActive  = false;
+    void     setManual(int ch, int val);
     void     clearAllManual();
     void     setManualEnabled(bool on);
 
-    // Active-channel bitmap — bit (ch-1) is set when manualValue[ch] >= 0.
-    // _dmxTask iterates only set bits via __builtin_ctz, skipping the
-    // 512-channel scan when the override list is sparse (typical case).
     uint32_t manualActiveBits[16] = {0};
     uint16_t manualActiveCount    = 0;
 
     // ── Runtime config (loaded from NVS) ───────────────────────────────────
-    // STA = normal mode (join configured WiFi).
-    // AP  = automatic fallback when STA SSID empty or connect fails.
-    String    cfgApSsid;
-    String    cfgApPassword;
-    String    cfgStaSsid;
-    String    cfgStaPassword;
-    uint16_t  cfgUniverse   = 0;
+    String       cfgApSsid;
+    String       cfgApPassword;
+    String       cfgStaSsid;
+    String       cfgStaPassword;
+    uint16_t     cfgUniverse = 0;
+    ProtocolType cfgProtocol = ProtocolType::ArtNet;
 
-    // Ethernet (0.0.0.0 static fields mean "unset" — ignored unless DHCP is off)
+    // ── Network DMX input options ──────────────────────────────────────────
+    // E1.31 multicast — when false, the source binds unicast only (no IGMP
+    // join). Default OFF: most home/lab WiFi APs handle multicast badly, and
+    // unicast just works. Enable when an IGMP-snooping switch is in play and
+    // multiple receivers need the same stream.
+    bool      cfgE131Multicast   = false;
+
+    // Sequence-skip — drop strictly-older sequence numbers from the same
+    // sender. Default on (matches spec hardening). Turn off if a buggy sender
+    // re-uses sequence bytes and most frames look stale to us.
+    bool      cfgSkipStaleSeq    = true;
+
+    // E1.31 minimum-priority filter (0..200). Frames below this priority are
+    // dropped. 0 = accept everything. Used to ignore preview / low-prio test
+    // streams while honouring the active high-prio show.
+    uint8_t   cfgE131MinPriority = 0;
+
+    // Hold-last-frame timeout in ms. After this many ms of no input, the DMX
+    // task zeroes the outgoing frame (effectively blackout) until input
+    // resumes. 0 = hold the last frame forever. Default 5000 = ~5 s grace
+    // for a console hiccup, then blackout so the show doesn't hold a stale
+    // cue indefinitely.
+    uint32_t  cfgHoldTimeoutMs   = 5000;
+
+    // Ethernet
     bool      cfgEthDhcp    = true;
     IPAddress cfgEthIp;
     IPAddress cfgEthGw;
     IPAddress cfgEthSub;
     IPAddress cfgEthDns;
 
-    // When true + ETH up → WiFi is turned off (STA + AP). When ETH goes down,
-    // WiFi is re-enabled automatically.
     bool      cfgWifiDisableOnEth = false;
 
 #if LUMOX_CH1_PIN_NONZERO
-    // Force DMX slot 1 to 0x01 on the wire. See config.h for the rationale —
-    // works around cheap moving-head receivers that resync on the run of
-    // zero bytes formed by start code (0x00) + slot 1 (0x00).
     bool      cfgCh1PinNonzero = DEFAULT_CH1_PIN_NONZERO;
 #endif
 
     // ── Runtime stats ──────────────────────────────────────────────────────
+    // statsArtnet* are protocol-agnostic ingress counters now — the prefix
+    // is historical. Updated by feedDmxFrame() regardless of source type.
     uint32_t  statsArtnetPackets = 0;
-    uint32_t  statsArtnetLastMs  = 0;       // millis() of the last ArtDMX packet
-    uint32_t  statsArtnetStale   = 0;       // packets rejected for stale sequence
-    uint32_t  statsArtnetLocked  = 0;       // packets rejected — other sender had lock
+    uint32_t  statsArtnetLastMs  = 0;
+    uint32_t  statsArtnetStale   = 0;
+    uint32_t  statsArtnetLocked  = 0;
     IPAddress statsArtnetSender;
     uint16_t  statsArtnetLastUni = 0;
 
-    // Sender-swap detection — flipping between controllers mid-show causes
-    // visible flicker because each sender has its own scene state.
     uint32_t  statsArtnetSenderSwaps = 0;
     uint32_t  statsArtnetLastSwapMs  = 0;
 
-    // ArtSync (multi-node frame synchronization — Art-Net spec §10)
-    uint32_t  statsArtSyncs        = 0;
-    uint32_t  statsArtSyncLastMs   = 0;
-    bool      statsInSyncMode      = false;   // true while ArtSync seen < 4 s ago
-    uint32_t  statsArtNetBadProto  = 0;       // packets rejected for ProtVer < 14
-
-    // DMX transmit-path health. Any of these moving fast = bad signal.
+    // DMX-TX health
     uint32_t  statsDmxFramesSent    = 0;
-    uint32_t  statsDmxSendErrors    = 0;    // dmx_send() returned 0
-    uint32_t  statsDmxWaitTimeouts  = 0;    // dmx_wait_sent() returned false
-    uint32_t  statsDmxConsecErrors  = 0;    // current consecutive error streak
-    uint32_t  statsDmxMaxConsecErr  = 0;    // worst streak seen
+    uint32_t  statsDmxSendErrors    = 0;
+    uint32_t  statsDmxWaitTimeouts  = 0;
+    uint32_t  statsDmxConsecErrors  = 0;
+    uint32_t  statsDmxMaxConsecErr  = 0;
     uint32_t  statsDmxLastFrameMs   = 0;
-    uint32_t  statsDmxRateHz        = 0;    // measured frame rate (whole Hz)
-    uint32_t  statsDmxRateTenths    = 0;    // 0..9, fractional digit of rate
-    uint32_t  statsDmxMaxMutexUs    = 0;    // worst mutex-take duration
+    uint32_t  statsDmxRateHz        = 0;
+    uint32_t  statsDmxRateTenths    = 0;
+    uint32_t  statsDmxMaxMutexUs    = 0;
 
-    // Explicit health check — return true only if the signal is flicker-free.
-    // 'reason' points to a static string describing the first failed criterion
-    // (empty when ok). Cheap — just reads counters.
     struct DmxHealth { bool ok; const char* reason; };
     DmxHealth dmxHealth() const;
 
-    // ── Mutex-spike ring buffer (debug aid) ────────────────────────────────
-    // Last N times the DMX task waited >MUTEX_LOG_THRESHOLD_US to acquire the
-    // DMX mutex. Helps trace mutex contention back to specific moments — pair
-    // entries with controller activity to find the offender. Written from
-    // _dmxTask (Core 1), read by status JSON builder (AsyncTCP task) — no
-    // mutex; torn reads are visually fine for a debug display.
+    // Mutex-spike ring buffer (debug aid)
     static constexpr uint8_t  MUTEX_LOG_SIZE         = 25;
     static constexpr uint32_t MUTEX_LOG_THRESHOLD_US = 1000;
-    static constexpr uint32_t MUTEX_DECAY_MS         = 60000;   // 1 min rolling window
+    static constexpr uint32_t MUTEX_DECAY_MS         = 60000;
     struct MutexLogEntry { uint32_t timeMs; uint32_t durationUs; };
     MutexLogEntry _mutexLog[MUTEX_LOG_SIZE] = {};
-    uint8_t       _mutexLogHead  = 0;     // next-write index
-    uint8_t       _mutexLogCount = 0;     // up to MUTEX_LOG_SIZE
-    uint32_t      _mutexDecayMs  = 0;     // last time the high-water max was decayed
+    uint8_t       _mutexLogHead  = 0;
+    uint8_t       _mutexLogCount = 0;
+    uint32_t      _mutexDecayMs  = 0;
 
 private:
     Lumox() = default;
 
-    // Art-Net
-    WiFiUDP   _udp;
-    uint8_t   _udpBuf[600] = {0};
-    uint8_t   _macCached[6] = {0};           // populated once in begin()
-    uint8_t   _lastSeq     = 0;              // last accepted Art-Net sequence byte
-    IPAddress _lastSeqSender;                // sender for _lastSeq (per-source tracking)
-    uint16_t  _nodeReportSeq = 0;            // rolling counter in ArtPollReply node report
-    uint32_t  _identifyUntilMs = 0;          // ms until identify-blink ends (0 = off)
-    bool      _parseArtNet(const uint8_t* buf, int len, IPAddress sender);
-    void      _handleArtAddress(const uint8_t* buf, int len, IPAddress sender);
-    void      _handleArtCommand(const uint8_t* buf, int len, IPAddress sender);
-    void      _handleArtPoll   (const uint8_t* buf, int len, IPAddress sender);
-    void      _handleArtSync();
-    bool      _dispatchArtNet(const uint8_t* buf, int len, IPAddress sender);
-    void      _sendArtNetUdp(IPAddress target, uint16_t port,
-                             const uint8_t* buf, size_t len);
-    void      _broadcastArtPollReply(const uint8_t* buf, size_t len);
+    // Active DMX source — owned (heap), created in beginProtocol().
+    IDmxSource* _source = nullptr;
 
-    // Shadow buffer for ArtSync mode. While in sync mode, incoming ArtDMX
-    // writes to _dmxShadow; OpSync flips shadow → dmxBuffer atomically so all
-    // nodes release new frame together. _dmxShadowLen tracks the highest slot
-    // written so partial-universe packets don't get padded with stale bytes
-    // when the shadow flips into the live buffer.
-    uint8_t   _dmxShadow[513]   = {0};
-    uint16_t  _dmxShadowLen     = 512;
-    bool      _dmxShadowDirty   = false;
-
-    // Last ArtPoll state — used for diagnostic routing (spec §11).
-    uint8_t   _pollTalkToMe     = 0;          // byte 12 flags
-    uint8_t   _pollDiagPriority = 0x10;       // byte 13 min priority
-    IPAddress _pollDiagTarget;                // unicast target for diag (if reply-mode)
-
-    // Periodic unsolicited ArtPollReply — spec recommends re-announce so
-    // controllers recover from missed packets without a discovery round.
-    uint32_t  _lastAnnounceMs   = 0;
+    uint8_t   _macCached[6]   = {0};       // populated once in begin()
+    uint32_t  _identifyUntilMs = 0;        // ms until identify-blink ends
 
     // Status LED
     void _updateLed();
 
     // DMX
-    // _dmxLock is a portMUX spinlock (NOT a FreeRTOS semaphore). Hold time is
-    // bounded — preemption is disabled inside the critical section, so the
-    // mutex holder cannot be paused mid-copy by tcpip_thread (prio 18) or any
-    // other task. Eliminates the priority-inversion spikes that the old
-    // semaphore showed (≥5 ms with WiFi RX bursts).
     dmx_port_t         _dmxPort  = DMX_NUM_1;
     portMUX_TYPE       _dmxLock  = portMUX_INITIALIZER_UNLOCKED;
     bool               _dmxReady = false;
     static void        _dmxTask(void* param);
 
-    // Dedicated Art-Net RX task (Core 1, prio 4). Decouples UDP drain from the
-    // Arduino loopTask so HTTP handlers / mDNS / DNS can't delay packet pickup.
-    TaskHandle_t       _artNetTaskH = nullptr;
-    volatile bool      _pendingAnnounce = false;   // set by event task → drained by RX task
-    static void        _artNetTaskWrap(void* param);
+    // Protocol RX task — replaces the old _artNetTaskWrap. Calls _source->service()
+    // in a tight cycle so HTTP / OTA can't delay packet pickup.
+    TaskHandle_t       _protoTaskH = nullptr;
+    volatile bool      _pendingNetEvent = false;
+    static void        _protocolTaskWrap(void* param);
 
     // Network
-    // _apMode:    AP is the SOLE network path (no ETH, no STA). Used to gate
-    //             getIP() preference + captive-portal redirects when the only
-    //             way to reach the node is via the AP itself.
-    // _apActive:  softAP is up and serving — may coexist with ETH (AP-aux mode).
-    //             Drives DNS-server tick + captive-portal lambda + ArtPollReply
-    //             AP broadcast branch. Always true when _apMode is true.
-    // _apFallback: AP came up because STA failed (informational — shown on UI).
     bool _apMode      = true;
     bool _apActive    = true;
     bool _apFallback  = false;
 
     // Ethernet (W5500 via arduino-esp32 v3.x ETH.h, lwIP-backed)
-    bool      _ethHw          = false;   // ETH.begin() succeeded (chip on SPI)
-    bool      _ethUp          = false;   // link UP + IP acquired (GOT_IP event)
-    bool      _ethLinkUp      = false;   // CONNECTED event seen (link, pre-IP)
+    bool      _ethHw          = false;
+    bool      _ethUp          = false;
+    bool      _ethLinkUp      = false;
     IPAddress _ethIp;
     uint8_t   _ethMac[6]      = {0};
     uint32_t  _ethLastDbgMs   = 0;
-    uint32_t  _ethSpeedMbps   = 0;       // ETH.linkSpeed() (10 / 100, 0 = down)
-    bool      _ethFullDuplex  = false;   // ETH.fullDuplex()
-    bool      _wifiOff        = false;   // true while WiFi is suspended by ETH
+    uint32_t  _ethSpeedMbps   = 0;
+    bool      _ethFullDuplex  = false;
+    bool      _wifiOff        = false;
     void      _onEthEvent(arduino_event_id_t event, arduino_event_info_t info);
-    void      _applyWifiOnEthPolicy();   // enable/disable WiFi on ETH state change
+    void      _applyWifiOnEthPolicy();
 
-    // Webserver — single AsyncWebServer + AsyncWebSocket on port 80.
-    // Both run on AsyncTCP's task, no loop tick needed for IO.
+    // Webserver
     AsyncWebServer    _http{WEB_SERVER_PORT};
     AsyncWebSocket    _ws{"/ws"};
     DNSServer         _dns;
